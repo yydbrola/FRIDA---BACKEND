@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ficha Técnica | {{ dados.nome }}</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@200;300;400;500;600&display=swap');
+        
+        body {
+            font-family: 'Outfit', 'Helvetica Neue', Arial, sans-serif;
+            background: #FFFFFF;
+            color: #000000;
+            line-height: 1.6;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 60px 40px;
+        }
+        
+        /* Header */
+        .header {
+            text-align: center;
+            margin-bottom: 60px;
+            padding-bottom: 40px;
+            border-bottom: 1px solid #000;
+        }
+        
+        .brand {
+            font-size: 12px;
+            letter-spacing: 6px;
+            text-transform: uppercase;
+            color: #666;
+            margin-bottom: 20px;
+        }
+        
+        .product-name {
+            font-size: 32px;
+            font-weight: 300;
+            text-transform: uppercase;
+            letter-spacing: 8px;
+            margin-bottom: 10px;
+        }
+        
+        .category {
+            font-size: 14px;
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            color: #666;
+        }
+        
+        /* Product Image */
+        .product-image {
+            text-align: center;
+            margin-bottom: 60px;
+        }
+        
+        .product-image img {
+            max-width: 100%;
+            max-height: 400px;
+            object-fit: contain;
+            border: 1px solid #f0f0f0;
+        }
+        
+        /* Description */
+        .description {
+            text-align: center;
+            max-width: 600px;
+            margin: 0 auto 60px;
+            padding: 0 20px;
+        }
+        
+        .description p {
+            font-size: 16px;
+            font-weight: 300;
+            line-height: 1.8;
+            color: #333;
+        }
+        
+        /* Specs Grid */
+        .specs-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 40px;
+            margin-bottom: 60px;
+        }
+        
+        .spec-section {
+            padding: 30px;
+            border: 1px solid #e0e0e0;
+        }
+        
+        .spec-title {
+            font-size: 11px;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            color: #666;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        .spec-list {
+            list-style: none;
+        }
+        
+        .spec-list li {
+            font-size: 14px;
+            font-weight: 300;
+            padding: 8px 0;
+            border-bottom: 1px solid #f5f5f5;
+        }
+        
+        .spec-list li:last-child {
+            border-bottom: none;
+        }
+        
+        /* Dimensions */
+        .dimensions {
+            display: flex;
+            justify-content: space-around;
+            flex-wrap: wrap;
+        }
+        
+        .dimension-item {
+            text-align: center;
+            padding: 10px 20px;
+        }
+        
+        .dimension-value {
+            font-size: 24px;
+            font-weight: 200;
+            display: block;
+        }
+        
+        .dimension-label {
+            font-size: 10px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: #666;
+        }
+        
+        /* Details */
+        .details-section {
+            background: #fafafa;
+            padding: 40px;
+            margin-bottom: 60px;
+        }
+        
+        .details-title {
+            font-size: 11px;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            color: #666;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+        
+        .details-list {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 20px;
+            list-style: none;
+        }
+        
+        .details-list li {
+            font-size: 13px;
+            font-weight: 300;
+            padding: 10px 20px;
+            border: 1px solid #e0e0e0;
+            background: #fff;
+        }
+        
+        /* Footer */
+        .footer {
+            text-align: center;
+            padding-top: 40px;
+            border-top: 1px solid #000;
+        }
+        
+        .footer-brand {
+            font-size: 18px;
+            font-weight: 300;
+            letter-spacing: 6px;
+            text-transform: uppercase;
+        }
+        
+        .footer-tagline {
+            font-size: 10px;
+            letter-spacing: 3px;
+            color: #666;
+            margin-top: 10px;
+        }
+        
+        /* Print Styles */
+        @media print {
+            body {
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
+            }
+            
+            .container {
+                padding: 20px;
+            }
+            
+            .specs-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        /* Responsive */
+        @media (max-width: 600px) {
+            .specs-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .product-name {
+                font-size: 24px;
+                letter-spacing: 4px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="brand">FRIDA COLLECTION</div>
+            <h1 class="product-name">{{ dados.nome }}</h1>
+            <div class="category">{{ dados.categoria }}</div>
+        </header>
+        
+        <!-- Product Image -->
+        {% if image_base64 %}
+        <div class="product-image">
+            <img src="data:image/png;base64,{{ image_base64 }}" alt="{{ dados.nome }}">
+        </div>
+        {% endif %}
+        
+        <!-- Description -->
+        <section class="description">
+            <p>{{ dados.descricao }}</p>
+        </section>
+        
+        <!-- Specs Grid -->
+        <div class="specs-grid">
+            <!-- Materials -->
+            <div class="spec-section">
+                <h3 class="spec-title">Materiais</h3>
+                <ul class="spec-list">
+                    {% for material in dados.materiais %}
+                    <li>{{ material }}</li>
+                    {% endfor %}
+                </ul>
+            </div>
+            
+            <!-- Colors -->
+            <div class="spec-section">
+                <h3 class="spec-title">Cores Disponíveis</h3>
+                <ul class="spec-list">
+                    {% for cor in dados.cores %}
+                    <li>{{ cor }}</li>
+                    {% endfor %}
+                </ul>
+            </div>
+        </div>
+        
+        <!-- Dimensions -->
+        <div class="spec-section" style="margin-bottom: 40px;">
+            <h3 class="spec-title">Dimensões</h3>
+            <div class="dimensions">
+                <div class="dimension-item">
+                    <span class="dimension-value">{{ dados.dimensoes.altura }}</span>
+                    <span class="dimension-label">Altura</span>
+                </div>
+                <div class="dimension-item">
+                    <span class="dimension-value">{{ dados.dimensoes.largura }}</span>
+                    <span class="dimension-label">Largura</span>
+                </div>
+                <div class="dimension-item">
+                    <span class="dimension-value">{{ dados.dimensoes.profundidade }}</span>
+                    <span class="dimension-label">Profundidade</span>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Details -->
+        <section class="details-section">
+            <h3 class="details-title">Detalhes de Design</h3>
+            <ul class="details-list">
+                {% for detalhe in dados.detalhes %}
+                <li>{{ detalhe }}</li>
+                {% endfor %}
+            </ul>
+        </section>
+        
+        <!-- Footer -->
+        <footer class="footer">
+            <div class="footer-brand">FRIDA</div>
+            <div class="footer-tagline">Design • Qualidade • Elegância</div>
+        </footer>
+    </div>
+</body>
+</html>

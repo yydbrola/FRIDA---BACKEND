@@ -19,6 +19,8 @@ Frida Orchestrator is a FastAPI backend for fashion product image processing (ba
 - Deep security validation (magic numbers + Pillow integrity checks)
 - Optional Supabase integration for audit trail and storage
 - JWT authentication (Supabase Auth) with dev mode
+- **NEW:** Role-Based Access Control (RBAC) with `admin` and `user` roles
+- **NEW:** Database-backed user management via Supabase PostgreSQL
 
 ## Project Structure
 
@@ -27,7 +29,8 @@ componentes/
 ├── app/
 │   ├── auth/
 │   │   ├── __init__.py
-│   │   └── supabase.py              # JWT validation (Supabase Auth)
+│   │   ├── supabase.py              # JWT validation + AuthUser model
+│   │   └── permissions.py           # RBAC decorators (@require_admin)
 │   ├── services/
 │   │   ├── __init__.py
 │   │   ├── classifier.py            # Gemini Vision + Structured Output
@@ -38,8 +41,13 @@ componentes/
 │   │   └── tech_sheet_premium.html  # Premium tech sheet (Outfit font)
 │   ├── main.py                      # FastAPI app + routes
 │   ├── config.py                    # Settings management
+│   ├── database.py                  # Supabase users table queries
 │   ├── utils.py                     # Validation + image utilities
 │   └── __init__.py
+├── SQL para o SUPABASE/             # Database migration scripts
+│   ├── 01_create_users_table.sql   # Users table + RLS policies
+│   ├── 02_seed_admin_zero.sql      # Initial admin user
+│   └── 03_seed_team_members.sql    # Team members seed data
 ├── venv/                            # Python 3.12 virtual environment
 ├── .env                             # Environment variables (secrets)
 ├── .env.example                     # Template for .env
@@ -86,7 +94,11 @@ All business logic lives in `app/services/`. The `main.py` handles HTTP routing 
 
 - **StorageService** (`storage.py`): Optional Supabase integration for audit trail. Uploads processed images to `processed-images` bucket with namespace `{user_id}/{product_id}/{timestamp}.png`. Logs metadata to `historico_geracoes` table.
 
-- **Auth Service** (`auth/supabase.py`): JWT validation via PyJWT and cryptography for Supabase Auth integration. Supports dev mode with fake user_id.
+- **Database Module** (`database.py`): Supabase client wrapper for querying `users` table. Provides `get_user_by_id()` and `get_user_by_email()` functions. Uses singleton pattern for client reuse.
+
+- **Auth Service** (`auth/supabase.py`): JWT validation via PyJWT + user lookup in `users` table. Returns `AuthUser` model with `user_id`, `email`, `role`, and `name`. Supports dev mode with fake user. Enforces that authenticated users must exist in the `users` table (HTTP 403 if not found).
+
+- **Permissions Module** (`auth/permissions.py`): RBAC (Role-Based Access Control) decorators for route protection. Provides `@require_admin`, `@require_user`, and `@require_any` decorators. Validates user role from database before allowing access.
 
 ### Processing Pipeline
 
@@ -122,10 +134,12 @@ Environment variables are managed in `config.py` via `python-dotenv`:
 - `GEMINI_API_KEY`: Google Gemini API key (server won't start without this)
 
 ### Optional - Supabase
-- `SUPABASE_URL`: Supabase project URL
-- `SUPABASE_KEY`: Supabase anon/service key
+- `SUPABASE_URL`: Supabase project URL (required for database + storage)
+- `SUPABASE_KEY`: Supabase anon/service key (required for database + storage)
 - `SUPABASE_BUCKET`: Storage bucket name (default: `processed-images`)
 - `SUPABASE_JWT_SECRET`: JWT secret for authentication (required if AUTH_ENABLED=true)
+
+**Note:** If `AUTH_ENABLED=true`, then `SUPABASE_URL` and `SUPABASE_KEY` are also required for querying the `users` table.
 
 ### Optional - Authentication
 - `AUTH_ENABLED`: Enable JWT authentication (default: `false`)
@@ -146,9 +160,10 @@ Environment variables are managed in `config.py` via `python-dotenv`:
 - Output size: 1080x1080px
 - Background color: #FFFFFF (pure white)
 
-**Storage:**
+**Storage & Database:**
 - Bucket name: `processed-images`
-- Table name: `historico_geracoes`
+- Audit table: `historico_geracoes` (image processing history)
+- Users table: `users` (authentication + RBAC)
 
 ## Endpoints
 
@@ -254,15 +269,24 @@ Environment variables are managed in `config.py` via `python-dotenv`:
 
 ## Type Contracts
 
-Services use TypedDict for data contracts:
+Services use TypedDict and Pydantic models for data contracts:
 
 ```python
+# Authentication (Pydantic)
+AuthUser = BaseModel:
+    user_id: str                    # UUID from JWT
+    email: str                       # From users table
+    role: Literal["admin", "user"]  # From users table
+    name: Optional[str]             # From users table
+
+# Classification (TypedDict)
 ClassificationResult = {
     "item": str,         # bolsa|lancheira|garrafa_termica|desconhecido
     "estilo": str,       # sketch|foto|desconhecido
     "confianca": float   # 0.0-1.0
 }
 
+# Tech Sheet (TypedDict)
 TechSheetData = {
     "nome": str,
     "categoria": str,
@@ -277,6 +301,7 @@ TechSheetData = {
     "detalhes": list[str]
 }
 
+# Storage (TypedDict)
 StorageResult = {
     "success": bool,
     "image_url": str | None,
@@ -386,29 +411,44 @@ StorageResult = {
 **Reason:** Authentication is disabled by default to simplify local development and testing. The auth module (`app/auth/`) is fully implemented but not enforced on routes by default.
 
 ### Dev Mode Behavior (AUTH_ENABLED=false)
-- `get_current_user_id()` returns fake UUID: `00000000-0000-0000-0000-000000000000`
+- `get_current_user()` returns fake `AuthUser`:
+  - `user_id`: `00000000-0000-0000-0000-000000000000`
+  - `email`: `dev@frida.com`
+  - `role`: `admin` (full access for testing)
+  - `name`: `Dev User`
 - No token validation is performed
+- No database queries (bypasses `users` table lookup)
 - All routes are accessible without Authorization header
 - Useful for local development and testing
 
 ### To Enable Authentication (Production)
 
-1. Set environment variable:
+**Prerequisites:**
+1. Run database migration scripts (see "Database Schema & RBAC" section)
+2. Create at least one admin user in Supabase Auth + users table
+
+**Configuration:**
+1. Set environment variables in `.env`:
    ```bash
    AUTH_ENABLED=true
-   ```
-
-2. Configure JWT secret from Supabase:
-   ```bash
+   SUPABASE_URL=https://your-project.supabase.co
+   SUPABASE_KEY=your_supabase_anon_key
    SUPABASE_JWT_SECRET=your_jwt_secret_here
    ```
-   (Get from: Supabase Dashboard > Settings > API > JWT Secret)
 
-3. Routes are already protected with `Depends(get_current_user_id)`:
+2. Get credentials from Supabase Dashboard:
+   - `SUPABASE_URL`: Project Settings > API > Project URL
+   - `SUPABASE_KEY`: Project Settings > API > anon/public key
+   - `SUPABASE_JWT_SECRET`: Project Settings > API > JWT Secret
+
+3. Routes are protected with `Depends(get_current_user)`:
    ```python
+   from app.auth.supabase import get_current_user, AuthUser
+
    @app.post("/process")
-   def processar_produto(..., user_id: str = Depends(get_current_user_id)):
-       # user_id is validated from JWT when AUTH_ENABLED=true
+   def processar_produto(..., user: AuthUser = Depends(get_current_user)):
+       # user is validated: JWT + users table lookup
+       # Access: user.user_id, user.email, user.role, user.name
    ```
 
 ### JWT Validation Details
@@ -417,6 +457,102 @@ StorageResult = {
 - **Claim:** Extracts user_id from "sub"
 - **Verifies:** Signature, expiration, audience
 - **Errors:** Returns HTTP 401 with `WWW-Authenticate: Bearer` header
+
+### AuthUser Model (NEW in v0.5.0)
+Authentication now returns a full user object instead of just user_id:
+
+```python
+class AuthUser(BaseModel):
+    user_id: str                    # UUID from JWT
+    email: str                       # From users table
+    role: Literal["admin", "user"]  # From users table
+    name: Optional[str]             # From users table
+```
+
+**Usage in routes:**
+```python
+from app.auth.supabase import get_current_user, AuthUser
+from app.auth.permissions import require_admin
+
+@app.post("/process")
+def processar_produto(user: AuthUser = Depends(get_current_user)):
+    # Access user.user_id, user.email, user.role, user.name
+    ...
+
+@app.post("/admin-only")
+@require_admin
+def admin_endpoint(user: AuthUser = Depends(get_current_user)):
+    # Guaranteed user.role == "admin"
+    ...
+```
+
+## Database Schema & RBAC (NEW in v0.5.0)
+
+### Users Table
+The `users` table stores user information and roles for RBAC:
+
+**Schema:**
+```sql
+CREATE TABLE public.users (
+  id UUID PRIMARY KEY,              -- Must match Supabase Auth user ID
+  email TEXT UNIQUE NOT NULL,
+  name TEXT,
+  role TEXT CHECK (role IN ('admin', 'user')) DEFAULT 'user' NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+```
+
+**Indexes:**
+- `idx_users_email` - Fast email lookups
+- `idx_users_role` - Fast role filtering
+
+**Row Level Security (RLS):**
+- Users can view their own record
+- Admins can view all records
+- Policies enforced at database level
+
+### Migration Scripts
+Located in `SQL para o SUPABASE/`, execute in order:
+
+1. **`01_create_users_table.sql`**: Creates table + indexes + RLS policies
+2. **`02_seed_admin_zero.sql`**: Inserts initial admin user (requires manual UUID from Supabase Auth)
+3. **`03_seed_team_members.sql`**: Seeds team members (optional)
+
+**Setup Process:**
+1. Run `01_create_users_table.sql` in Supabase SQL Editor
+2. Create admin user in Supabase Auth Dashboard
+3. Copy the generated UUID
+4. Edit `02_seed_admin_zero.sql` with the UUID and execute
+5. Optionally run `03_seed_team_members.sql` for team
+
+### RBAC Implementation
+Role-based access control is implemented via decorators:
+
+```python
+from app.auth.permissions import require_admin, require_user, require_any
+
+# Admin only
+@app.delete("/users/{user_id}")
+@require_admin
+def delete_user(user_id: str, user: AuthUser = Depends(get_current_user)):
+    # Only admins can access this
+    ...
+
+# Any authenticated user
+@app.get("/profile")
+@require_any
+def get_profile(user: AuthUser = Depends(get_current_user)):
+    # Any role ("admin" or "user") can access
+    ...
+```
+
+**Protection Flow:**
+1. Request arrives with JWT token
+2. `get_current_user()` validates JWT → extracts user_id
+3. Queries `users` table for user data
+4. Returns `AuthUser` with role
+5. `@require_admin` decorator checks if `user.role == "admin"`
+6. Returns HTTP 403 if role mismatch
 
 ## Dependencies
 
@@ -443,16 +579,17 @@ StorageResult = {
 
 ## Git Status
 
-**Current Branch:** `fix/classifier-schema-compatibility`
+**Current Branch:** `feature/database-and-permissions`
+
 **Recent Commits:**
+- `abb269f` - feat: add database scripts and permission logic
+- `41e35c9` - docs: update project context and testing protocols
+- `9ab6fad` - feat: implement Supabase JWT authentication module
 - `fde4658` - fix: remove unsupported validation keywords from Gemini schema
 - `de0d7fb` - feat: complete backend synchronization and audit storage
-- `e3a809f` - feat: implement robust startup validation and structured AI output
-- `b476310` - Initial commit: Frida Orchestrator Backend
 
 **Modified Files:**
-- `requirements.txt` (updated dependencies)
-- `FASE_DE_TESTES.md` (testing progress updated)
+- `GEMINI.md` (updated with database and RBAC context)
 
 ## Quick Reference
 
@@ -475,6 +612,8 @@ curl -X POST http://localhost:8000/classify -F "file=@test.jpg"
 3. **WebP files rejected:** Use `-F "file=@image.webp;type=image/webp"` with curl
 4. **Image distortion:** Input has model/person, see "Known Limitations" section
 5. **Authentication errors:** Check `AUTH_ENABLED` setting in `.env`
+6. **HTTP 403 "User not registered":** When `AUTH_ENABLED=true`, user must exist in `users` table. Run migration scripts and create user in Supabase Auth + users table.
+7. **Database errors:** Ensure `SUPABASE_URL` and `SUPABASE_KEY` are configured when using `AUTH_ENABLED=true`
 
 ## Related Documentation
 

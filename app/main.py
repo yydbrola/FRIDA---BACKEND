@@ -18,6 +18,7 @@ from app.services.background_remover import BackgroundRemoverService
 from app.services.tech_sheet import TechSheetService
 from app.services.storage import StorageService
 from app.auth import get_current_user, AuthUser
+from app.database import create_product, get_user_products, create_image, get_supabase_client
 
 
 # =============================================================================
@@ -53,6 +54,7 @@ app.add_middleware(
 class ProcessResponse(BaseModel):
     """Resposta do endpoint de processamento."""
     status: str
+    product_id: Optional[str] = None
     categoria: str
     estilo: str
     confianca: float
@@ -329,6 +331,23 @@ def processar_produto(
         else:
             print("[PROCESS] Serviço de classificação não disponível (GEMINI_API_KEY não configurada)")
         
+        # ============================================================
+        # NOVO: Salvar produto no banco após classificação
+        # ============================================================
+        db_product_id = None
+        try:
+            product = create_product(
+                name=f"{classificacao['item'].title()} - {file.filename or 'Upload'}",
+                category=classificacao['item'],
+                classification=classificacao,
+                user_id=user_id
+            )
+            db_product_id = product['id']
+            print(f"[DATABASE] ✓ Produto salvo: {db_product_id}")
+        except Exception as e:
+            print(f"[DATABASE] ❌ Erro ao salvar produto: {str(e)}")
+            # Continue processamento mesmo se falhar
+        
         # 4. Processa a imagem (remove fundo + fundo branco)
         if background_service:
             print("[PROCESS] Processando imagem...")
@@ -355,6 +374,7 @@ def processar_produto(
         
         # 7. Registra no Supabase para auditoria (opcional, não bloqueante)
         storage_url = None
+        storage_path = None
         if storage_service:
             try:
                 print(f"[PROCESS] Registrando no Supabase para user {user_id}...")
@@ -365,12 +385,29 @@ def processar_produto(
                     estilo=classificacao["estilo"],
                     confianca=classificacao["confianca"],
                     ficha_tecnica=ficha,
-                    product_id=product_id,
+                    product_id=db_product_id if db_product_id else product_id,
                     original_filename=file.filename
                 )
                 if storage_result["success"]:
                     storage_url = storage_result["image_url"]
+                    storage_path = storage_result.get("storage_path")
                     print(f"[PROCESS] ✓ Registrado: {storage_result['record_id']}")
+                    
+                    # ============================================================
+                    # NOVO: Registrar imagem no banco
+                    # ============================================================
+                    if db_product_id and storage_url:
+                        try:
+                            image_record = create_image(
+                                product_id=db_product_id,
+                                type='processed',
+                                bucket=settings.SUPABASE_BUCKET,
+                                path=storage_url,
+                                user_id=user_id
+                            )
+                            print(f"[DATABASE] ✓ Imagem registrada: {image_record['id']}")
+                        except Exception as e:
+                            print(f"[DATABASE] ❌ Erro ao registrar imagem: {str(e)}")
                 else:
                     print(f"[PROCESS] ⚠ Falha no registro: {storage_result['error']}")
             except Exception as e:
@@ -381,6 +418,7 @@ def processar_produto(
         
         return ProcessResponse(
             status="sucesso",
+            product_id=db_product_id,
             categoria=classificacao["item"],
             estilo=classificacao["estilo"],
             confianca=classificacao["confianca"],
@@ -446,6 +484,84 @@ def classificar_apenas(
         "classificacao": resultado,
         "user_id": user_id
     }
+
+
+# =============================================================================
+# Products Endpoints
+# =============================================================================
+
+@app.get("/products")
+def listar_produtos(user: AuthUser = Depends(get_current_user)):
+    """
+    Lista todos os produtos do usuário autenticado.
+    
+    Returns:
+        JSON com status, total e lista de produtos
+    """
+    try:
+        products = get_user_products(user.user_id)
+        
+        return {
+            "status": "sucesso",
+            "total": len(products),
+            "products": products,
+            "user_id": user.user_id
+        }
+        
+    except Exception as e:
+        print(f"[PRODUCTS] ❌ Erro ao listar produtos: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Erro ao listar produtos"
+        )
+
+
+@app.get("/products/{product_id}")
+def obter_produto(
+    product_id: str,
+    user: AuthUser = Depends(get_current_user)
+):
+    """
+    Obtém detalhes de um produto específico.
+    
+    Args:
+        product_id: UUID do produto
+        
+    Returns:
+        JSON com status e dados do produto
+    """
+    try:
+        client = get_supabase_client()
+        result = client.table('products').select('*').eq('id', product_id).execute()
+        
+        if not result.data:
+            raise HTTPException(
+                status_code=404,
+                detail="Produto não encontrado"
+            )
+        
+        product = result.data[0]
+        
+        # Verificar ownership (RLS já faz isso, mas validação adicional)
+        if product['created_by'] != user.user_id and user.role != 'admin':
+            raise HTTPException(
+                status_code=403,
+                detail="Acesso negado a este produto"
+            )
+        
+        return {
+            "status": "sucesso",
+            "product": product
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[PRODUCTS] ❌ Erro ao obter produto: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Erro ao obter produto"
+        )
 
 
 @app.post("/remove-background")

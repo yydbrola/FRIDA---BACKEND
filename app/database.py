@@ -113,3 +113,125 @@ def get_user_by_email(email: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         print(f"[DATABASE] ❌ Erro ao buscar user por email {email}: {str(e)}")
         raise
+
+
+# =============================================================================
+# Products CRUD
+# =============================================================================
+
+def create_product(name: str, category: str, classification: dict, user_id: str) -> Dict[str, Any]:
+    """
+    Cria um novo produto no banco de dados.
+    
+    Args:
+        name: Nome do produto
+        category: Categoria (bolsa, lancheira, garrafa_termica)
+        classification: Resultado da classificação Gemini (dict)
+        user_id: UUID do usuário criador
+        
+    Returns:
+        Dict com dados completos do produto criado
+        
+    Raises:
+        Exception: Se falha ao inserir no banco
+    """
+    client = get_supabase_client()
+    
+    try:
+        result = client.table('products').insert({
+            'name': name,
+            'category': category,
+            'classification_result': classification,
+            'created_by': user_id,
+            'status': 'draft'
+        }).execute()
+        
+        if not result.data:
+            raise Exception("Falha ao criar produto: resposta vazia")
+        
+        return result.data[0]
+        
+    except Exception as e:
+        print(f"[DATABASE] ❌ Erro ao criar produto: {str(e)}")
+        raise
+
+
+def get_user_products(user_id: str) -> list:
+    """
+    Lista todos os produtos de um usuário.
+    
+    Args:
+        user_id: UUID do usuário
+        
+    Returns:
+        Lista de produtos (vazia se nenhum encontrado)
+    """
+    client = get_supabase_client()
+    
+    try:
+        result = client.table('products')\
+            .select('*')\
+            .eq('created_by', user_id)\
+            .order('created_at', desc=True)\
+            .execute()
+        
+        return result.data if result.data else []
+        
+    except Exception as e:
+        print(f"[DATABASE] ❌ Erro ao listar produtos: {str(e)}")
+        return []
+
+
+# =============================================================================
+# Images CRUD
+# =============================================================================
+
+def create_image(
+    product_id: str, 
+    type: str, 
+    bucket: str, 
+    path: str, 
+    user_id: str
+) -> Dict[str, Any]:
+    """
+    Registra uma imagem processada no banco.
+    
+    Args:
+        product_id: UUID do produto relacionado
+        type: Tipo da imagem ('original', 'segmented', 'processed')
+        bucket: Nome do bucket no Supabase Storage
+        path: Caminho do arquivo no storage
+        user_id: UUID do usuário criador
+        
+    Returns:
+        Dict com dados completos da imagem registrada
+        
+    Raises:
+        ValueError: Se type não for válido
+        Exception: Se falha ao inserir no banco
+    """
+    # Validar type
+    valid_types = ['original', 'segmented', 'processed']
+    if type not in valid_types:
+        raise ValueError(f"Tipo inválido: {type}. Use: {', '.join(valid_types)}")
+    
+    client = get_supabase_client()
+    
+    try:
+        result = client.table('images').insert({
+            'product_id': product_id,
+            'type': type,
+            'storage_bucket': bucket,
+            'storage_path': path,
+            'created_by': user_id
+        }).execute()
+        
+        if not result.data:
+            raise Exception("Falha ao registrar imagem: resposta vazia")
+        
+        return result.data[0]
+        
+    except Exception as e:
+        print(f"[DATABASE] ❌ Erro ao registrar imagem: {str(e)}")
+        raise
+

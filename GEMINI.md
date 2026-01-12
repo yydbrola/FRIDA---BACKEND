@@ -8,7 +8,8 @@
 2.  **Image Processing:** Automated background removal using `rembg` (U2NET) and standardizing images with a pure white background using `Pillow`.
 3.  **Tech Sheet Generation:** Generates premium technical data sheets (HTML/JSON) using Jinja2 templates.
 4.  **Audit Storage:** Persists processed images and tech sheets to Supabase for enterprise audit trail.
-5.  **Secure Authentication:** Validates Supabase JWT tokens to identify users and secure endpoints.
+5.  **Secure Authentication:** Validates Supabase JWT tokens to identify users.
+6.  **RBAC (Role-Based Access Control):** Enforces permissions based on user roles (`admin`, `user`) stored in Supabase.
 
 ## Tech Stack
 -   **Runtime:** Python 3.12+
@@ -17,7 +18,7 @@
 -   **AI Model:** Google Generative AI (Gemini 1.5 Flash + Structured Output)
 -   **Image Logic:** `rembg` (Background Removal), `Pillow` (Manipulation + Deep Validation)
 -   **Templating:** Jinja2
--   **Storage:** Supabase (PostgreSQL + Object Storage)
+-   **Database:** Supabase PostgreSQL (via `supabase-py` client)
 -   **Authentication:** Supabase Auth (JWT validation via `PyJWT` + `cryptography`)
 -   **Environment:** `python-dotenv`
 
@@ -27,6 +28,7 @@ componentes/
 ├── app/
 │   ├── auth/
 │   │   ├── __init__.py         # Auth module exports
+│   │   ├── permissions.py      # RBAC decorators (@require_admin)
 │   │   └── supabase.py         # JWT validation logic
 │   ├── services/
 │   │   ├── classifier.py       # Gemini API integration (Structured Output)
@@ -37,7 +39,12 @@ componentes/
 │   │   └── tech_sheet_premium.html
 │   ├── main.py                 # FastAPI entry point (Fail-Fast Startup)
 │   ├── config.py               # Settings management
+│   ├── database.py             # Supabase DB client (Users table lookup)
 │   └── utils.py                # Helpers (Deep Validation, image manipulation)
+├── SQL para o SUPABASE/        # Database Migration Scripts
+│   ├── 01_create_users_table.sql
+│   ├── 02_seed_admin_zero.sql
+│   └── 03_seed_team_members.sql
 ├── venv/                       # Virtual environment (ignored by git)
 ├── .env                        # Environment variables (API Keys)
 ├── .env.example                # Template for env variables
@@ -47,6 +54,19 @@ componentes/
 ├── FASE_DE_TESTES.md           # Testing protocols
 └── README.md                   # Project documentation
 ```
+
+## Database Schema & Migrations
+Located in `SQL para o SUPABASE/`:
+1.  **`01_create_users_table.sql`**: Creates `users` table for RBAC.
+2.  **`02_seed_admin_zero.sql`**: Inserts the initial Admin user.
+3.  **`03_seed_team_members.sql`**: Inserts team members.
+
+**Users Table Schema:**
+-   `id` (UUID, Primary Key)
+-   `email` (VARCHAR, Unique)
+-   `name` (VARCHAR)
+-   `role` (VARCHAR: 'admin' | 'user')
+-   `created_at` (TIMESTAMPTZ)
 
 ## Development Workflow
 
@@ -65,35 +85,12 @@ pip install -r requirements.txt
 -   `GEMINI_API_KEY`: API Key for Google Gemini (Obrigatório para o startup).
 -   `AUTH_ENABLED`: `true` or `false` (Dev mode).
 
-**Optional (for Prod/Audit):**
+**Optional (for Prod/Audit/DB):**
 -   `SUPABASE_URL`: Supabase project URL
 -   `SUPABASE_KEY`: Supabase anon/service key
 -   `SUPABASE_JWT_SECRET`: Secret for validating tokens (Required if AUTH_ENABLED=true)
 
-### 3. Supabase Setup (for Audit)
-Create the `historico_geracoes` table and `processed-images` bucket:
-```sql
-CREATE TABLE historico_geracoes (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    user_id UUID,                          -- User who processed the image
-    product_id UUID,                       -- Associated product (optional)
-    categoria VARCHAR(50),
-    estilo VARCHAR(20),
-    confianca FLOAT,
-    image_url TEXT,
-    ficha_tecnica JSONB,
-    image_filename TEXT,
-    processing_time_ms INTEGER
-);
-
--- Indexes for common queries
-CREATE INDEX idx_historico_user ON historico_geracoes(user_id);
-CREATE INDEX idx_historico_product ON historico_geracoes(product_id);
-CREATE INDEX idx_historico_created ON historico_geracoes(created_at DESC);
-```
-
-### 4. Running the Server
+### 3. Running the Server
 ```bash
 # Development mode with hot-reload
 uvicorn app.main:app --reload --port 8000
@@ -107,20 +104,22 @@ Swagger UI: `http://localhost:8000/docs`
 Logic is strictly separated into the `app/services/` directory. `main.py` handles request parsing and response formatting, delegating complex logic to specific services.
 
 ### Image Processing Pipeline
-1. **Input:** Multipart Form Data (Image + Options).
-2. **Authentication:** Validates JWT (if enabled) and extracts `user_id`.
-3. **Deep Validation:** Checks **Magic Numbers** (file signatures) and **Pillow Integrity** to prevent spoofing.
-4. **Classification:** Gemini identifies category/style using Structured Output (native JSON).
-5. **Segmentation:** `rembg` removes the background.
-6. **Composition:** `Pillow` applies a #FFFFFF (pure white) background.
-7. **Output:** Base64 encoded string of the processed image.
-8. **Audit (Optional):** `StorageService` persists image and metadata to Supabase.
+1.  **Input:** Multipart Form Data (Image + Options).
+2.  **Authentication:** Validates JWT (if enabled) and extracts `user_id`.
+3.  **Authorization:** Checks user role via `app/database.py` (if endpoint requires specific role).
+4.  **Deep Validation:** Checks **Magic Numbers** (file signatures) and **Pillow Integrity** to prevent spoofing.
+5.  **Classification:** Gemini identifies category/style using Structured Output (native JSON).
+6.  **Segmentation:** `rembg` removes the background.
+7.  **Composition:** `Pillow` applies a #FFFFFF (pure white) background.
+8.  **Output:** Base64 encoded string of the processed image.
+9.  **Audit (Optional):** `StorageService` persists image and metadata to Supabase.
 
 ### Reliability & Performance
 -   **Fail-Fast Startup:** The API will NOT start if `GEMINI_API_KEY` is missing or if critical services (`rembg`, `Classifier`, `TechSheet`) fail to initialize.
 -   **CPU-Bound Optimization:** Processing routes use `def` instead of `async def` to allow FastAPI to manage them in a separate thread pool, preventing Event Loop blocking during heavy image manipulation.
 -   **Structured AI:** Native Gemini `response_schema` ensures the AI always returns valid, typed JSON, eliminating the need for Regex parsing.
 -   **Authentication Module:** `app/auth/` handles JWT validation. In Dev Mode (`AUTH_ENABLED=false`), returns a fake `user_id` to simplify testing.
+-   **RBAC Module:** `app/auth/permissions.py` provides decorators like `@require_admin` to protect sensitive endpoints.
 
 ### Health Check
 -   Accessible at `/health`.

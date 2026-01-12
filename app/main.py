@@ -17,7 +17,7 @@ from app.services.classifier import ClassifierService
 from app.services.background_remover import BackgroundRemoverService
 from app.services.tech_sheet import TechSheetService
 from app.services.storage import StorageService
-from app.auth.supabase import get_current_user_id
+from app.auth import get_current_user, AuthUser
 
 
 # =============================================================================
@@ -275,7 +275,7 @@ def processar_produto(
     file: UploadFile = File(..., description="Imagem do produto para processar"),
     gerar_ficha: bool = Form(False, description="Se True, gera ficha técnica premium"),
     product_id: Optional[str] = Form(None, description="ID do produto para organizar storage"),
-    user_id: str = Depends(get_current_user_id)
+    user: AuthUser = Depends(get_current_user)
 ):
     """
     Endpoint principal de processamento de produtos.
@@ -297,6 +297,9 @@ def processar_produto(
     
     Requer autenticação JWT (se AUTH_ENABLED=true).
     """
+    # Extrair user_id do AuthUser para uso no código existente
+    user_id = user.user_id
+    
     # Validação rápida do Content-Type (primeira camada)
     if not file.content_type or not validate_image_file(file.content_type):
         raise HTTPException(
@@ -399,7 +402,7 @@ def processar_produto(
 @app.post("/classify")
 def classificar_apenas(
     file: UploadFile = File(..., description="Imagem para classificar"),
-    user_id: str = Depends(get_current_user_id)
+    user: AuthUser = Depends(get_current_user)
 ):
     """
     Endpoint para apenas classificar uma imagem (sem processar).
@@ -408,6 +411,9 @@ def classificar_apenas(
     NOTA: Rota síncrona para evitar bloqueio do Event Loop.
     Requer autenticação JWT (se AUTH_ENABLED=true).
     """
+    # Extrair user_id do AuthUser
+    user_id = user.user_id
+    
     if not classifier_service:
         raise HTTPException(
             status_code=503,
@@ -445,7 +451,7 @@ def classificar_apenas(
 @app.post("/remove-background")
 def remover_fundo_apenas(
     file: UploadFile = File(..., description="Imagem para remover fundo"),
-    user_id: str = Depends(get_current_user_id)
+    user: AuthUser = Depends(get_current_user)
 ):
     """
     Endpoint para apenas remover o fundo de uma imagem.
@@ -454,6 +460,9 @@ def remover_fundo_apenas(
     NOTA: Rota síncrona para evitar bloqueio do Event Loop.
     Requer autenticação JWT (se AUTH_ENABLED=true).
     """
+    # Extrair user_id do AuthUser
+    user_id = user.user_id
+    
     if not background_service:
         raise HTTPException(
             status_code=503,
@@ -494,7 +503,7 @@ def remover_fundo_apenas(
 # =============================================================================
 
 @app.get("/auth/test")
-def test_auth(user_id: str = Depends(get_current_user_id)):
+def test_auth(user: AuthUser = Depends(get_current_user)):
     """
     Endpoint para testar autenticação.
     
@@ -502,12 +511,15 @@ def test_auth(user_id: str = Depends(get_current_user_id)):
     curl -H "Authorization: Bearer YOUR_JWT" http://localhost:8000/auth/test
     
     Com AUTH_ENABLED=false: Retorna user_id fake (dev mode)
-    Com AUTH_ENABLED=true: Requer token JWT válido
+    Com AUTH_ENABLED=true: Requer token JWT válido + cadastro
     """
     return {
         "status": "authenticated",
-        "user_id": user_id,
-        "message": "Token JWT válido!"
+        "user_id": user.user_id,
+        "email": user.email,
+        "role": user.role,
+        "name": user.name,
+        "message": "Token JWT válido! Usuário cadastrado no sistema."
     }
 
 

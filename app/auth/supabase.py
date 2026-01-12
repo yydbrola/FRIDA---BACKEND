@@ -13,8 +13,9 @@ Configuração via .env:
 """
 
 import jwt
-from typing import Optional
+from typing import Optional, Literal
 from fastapi import HTTPException, Header, status
+from pydantic import BaseModel
 
 from app.config import settings
 
@@ -127,8 +128,105 @@ def verify_supabase_jwt(authorization: str) -> str:
 
 
 # =============================================================================
+# AuthUser Model
+# =============================================================================
+
+class AuthUser(BaseModel):
+    """
+    Modelo de usuário autenticado com dados do banco.
+    Substitui retorno direto de user_id (string).
+    """
+    user_id: str
+    email: str
+    role: Literal["admin", "user"]
+    name: Optional[str] = None
+
+
+# =============================================================================
 # FastAPI Dependencies
 # =============================================================================
+
+def get_current_user(
+    authorization: Optional[str] = Header(None, alias="Authorization")
+) -> AuthUser:
+    """
+    Dependency que valida JWT + consulta users table.
+    
+    Fluxo de validação:
+    1. Dev mode (AUTH_ENABLED=false) → retorna AuthUser fake (bypass)
+    2. Prod mode → valida JWT usando verify_supabase_jwt() existente
+    3. Prod mode → consulta users table via Supabase Client
+    4. Se user não existe na tabela → HTTP 403 (não cadastrado)
+    5. Se user existe → retorna AuthUser com dados completos
+    
+    Args:
+        authorization: Header "Authorization: Bearer {token}"
+    
+    Returns:
+        AuthUser com user_id, email, role, name
+    
+    Raises:
+        HTTPException 401: JWT inválido ou expirado
+        HTTPException 403: User não cadastrado no sistema
+        HTTPException 500: Erro de database
+    """
+    # Dev mode: bypass completo (não consulta banco)
+    if not settings.AUTH_ENABLED:
+        return AuthUser(
+            user_id=DEV_USER_ID,
+            email="dev@frida.com",
+            role="admin",
+            name="Dev User"
+        )
+    
+    # Prod mode: validar JWT (usa código existente)
+    try:
+        user_id = verify_supabase_jwt(authorization)
+    except AuthenticationError:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=401,
+            detail=f"Erro de autenticação: {str(e)}",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+    
+    # NOVA VALIDAÇÃO: consultar users table
+    try:
+        from app.database import get_user_by_id
+        user_data = get_user_by_id(user_id)
+    except Exception as e:
+        # Erro de database (conexão, timeout, etc)
+        print(f"[AUTH] ❌ Erro ao consultar users table: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="Erro interno ao validar usuário. Tente novamente."
+        )
+    
+    # User não existe na tabela users
+    if not user_data:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Usuário não cadastrado no sistema. "
+                "Contate o administrador para aprovação."
+            )
+        )
+    
+    # Validar campo role (defesa contra dados inválidos)
+    role = user_data.get("role", "user")
+    if role not in ["admin", "user"]:
+        print(f"[AUTH] ⚠️ Role inválido para user {user_id}: {role}")
+        role = "user"  # Fallback seguro
+    
+    # Retornar dados completos do usuário
+    return AuthUser(
+        user_id=str(user_data["id"]),
+        email=user_data["email"],
+        role=role,
+        name=user_data.get("name")
+    )
+
 
 def get_current_user_id(
     authorization: Optional[str] = Header(None, alias="Authorization")
@@ -136,10 +234,8 @@ def get_current_user_id(
     """
     Dependency do FastAPI para obter o user_id do token JWT.
     
-    Uso:
-        @app.get("/protected")
-        def protected_route(user_id: str = Depends(get_current_user_id)):
-            return {"user_id": user_id}
+    DEPRECATED: Use get_current_user() diretamente para ter acesso a role.
+    Mantido para backward compatibility.
     
     Args:
         authorization: Header Authorization (injetado automaticamente)
@@ -150,13 +246,6 @@ def get_current_user_id(
     Raises:
         AuthenticationError: Se token ausente/inválido e AUTH_ENABLED=True
     """
-    # Se authorization está presente, valida o token
-    if authorization:
-        return verify_supabase_jwt(authorization)
-    
-    # Se não há header e AUTH está desabilitado, retorna user fake
-    if not settings.AUTH_ENABLED:
-        return DEV_USER_ID
-    
-    # Auth habilitado mas sem header → erro
-    raise AuthenticationError("Header Authorization ausente")
+    user = get_current_user(authorization)
+    return user.user_id
+

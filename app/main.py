@@ -5,7 +5,7 @@ Ponto de entrada da API e definição das rotas de upload e processamento.
 
 import io
 import base64
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel
@@ -17,6 +17,7 @@ from app.services.classifier import ClassifierService
 from app.services.background_remover import BackgroundRemoverService
 from app.services.tech_sheet import TechSheetService
 from app.services.storage import StorageService
+from app.auth.supabase import get_current_user_id
 
 
 # =============================================================================
@@ -31,10 +32,14 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# CORS para permitir requests do frontend
+# CORS para permitir requests do frontend Next.js
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Em produção, especifique os domínios permitidos
+    allow_origins=[
+        "http://localhost:3000",      # Next.js dev
+        "http://127.0.0.1:3000",      # Next.js dev (alt)
+        "https://*.vercel.app",       # Vercel preview/prod
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -63,6 +68,8 @@ class HealthResponse(BaseModel):
     gemini_configured: bool
     services: dict  # Status de cada serviço
     ready: bool  # True se todos os serviços críticos estão OK
+    configuration: dict  # Status de configurações
+    warnings: Optional[list] = None  # Avisos de configuração
 
 
 class StartupError(Exception):
@@ -162,6 +169,16 @@ async def startup_event():
     print("[STARTUP] ======================================")
     print("[STARTUP] ✓ Todos os serviços inicializados com sucesso!")
     print(f"[STARTUP] ✓ Servidor pronto em http://{settings.HOST}:{settings.PORT}")
+    
+    # Status de autenticação
+    if settings.AUTH_ENABLED:
+        if settings.SUPABASE_JWT_SECRET:
+            print("[STARTUP] ✓ Authentication ENABLED with JWT validation")
+        else:
+            print("[STARTUP] ⚠ AUTH_ENABLED=true but SUPABASE_JWT_SECRET not set!")
+    else:
+        print("[STARTUP] ⚠ Authentication DISABLED (development mode)")
+    
     print("[STARTUP] ======================================")
 
 
@@ -229,19 +246,36 @@ async def health_check():
     else:
         status = "unhealthy"
     
+    # Status de configurações
+    configuration = {
+        "gemini_configured": bool(settings.GEMINI_API_KEY),
+        "supabase_configured": bool(settings.SUPABASE_URL),
+        "auth_enabled": settings.AUTH_ENABLED,
+        "jwt_secret_configured": bool(settings.SUPABASE_JWT_SECRET)
+    }
+    
+    # Validação de warnings
+    warnings = []
+    if settings.AUTH_ENABLED and not settings.SUPABASE_JWT_SECRET:
+        warnings.append("AUTH_ENABLED=true mas SUPABASE_JWT_SECRET não configurado")
+    
     return HealthResponse(
         status=status,
         version="0.5.0",
         gemini_configured=bool(settings.GEMINI_API_KEY),
         services=services_status,
-        ready=all_critical_ok
+        ready=all_critical_ok,
+        configuration=configuration,
+        warnings=warnings if warnings else None
     )
 
 
 @app.post("/process", response_model=ProcessResponse)
 def processar_produto(
     file: UploadFile = File(..., description="Imagem do produto para processar"),
-    gerar_ficha: bool = Form(False, description="Se True, gera ficha técnica premium")
+    gerar_ficha: bool = Form(False, description="Se True, gera ficha técnica premium"),
+    product_id: Optional[str] = Form(None, description="ID do produto para organizar storage"),
+    user_id: str = Depends(get_current_user_id)
 ):
     """
     Endpoint principal de processamento de produtos.
@@ -251,12 +285,17 @@ def processar_produto(
     2. Classifica o item (bolsa/lancheira/garrafa) e estilo (sketch/foto)
     3. Remove o fundo e aplica branco puro (#FFFFFF)
     4. Opcionalmente gera ficha técnica premium
-    5. Retorna imagem processada em base64 e dados
+    5. Registra no Supabase para auditoria (se configurado)
+    6. Retorna imagem processada em base64 e dados
+    
+    **Novo:** Suporta product_id opcional para organizar storage.
     
     NOTA: Esta rota é definida como `def` (síncrona) intencionalmente.
     O FastAPI executa automaticamente funções síncronas em um ThreadPool,
     evitando o bloqueio do Event Loop durante operações CPU-bound como
     rembg e Pillow.
+    
+    Requer autenticação JWT (se AUTH_ENABLED=true).
     """
     # Validação rápida do Content-Type (primeira camada)
     if not file.content_type or not validate_image_file(file.content_type):
@@ -281,7 +320,7 @@ def processar_produto(
         classificacao = {"item": "desconhecido", "estilo": "desconhecido", "confianca": 0.0}
         
         if classifier_service:
-            print(f"[PROCESS] Classificando imagem: {file.filename}")
+            print(f"[PROCESS] Classificando imagem para user {user_id}: {file.filename}")
             classificacao = classifier_service.classificar(content, file.content_type)
             print(f"[PROCESS] Resultado: {classificacao}")
         else:
@@ -315,13 +354,15 @@ def processar_produto(
         storage_url = None
         if storage_service:
             try:
-                print("[PROCESS] Registrando no Supabase para auditoria...")
+                print(f"[PROCESS] Registrando no Supabase para user {user_id}...")
                 storage_result = storage_service.processar_e_registrar(
                     image_bytes=imagem_bytes,
+                    user_id=user_id,
                     categoria=classificacao["item"],
                     estilo=classificacao["estilo"],
                     confianca=classificacao["confianca"],
                     ficha_tecnica=ficha,
+                    product_id=product_id,
                     original_filename=file.filename
                 )
                 if storage_result["success"]:
@@ -332,6 +373,9 @@ def processar_produto(
             except Exception as e:
                 print(f"[PROCESS] ⚠ Erro no storage (não bloqueante): {e}")
         
+        # Log de auditoria final
+        print(f"[PROCESS] Processing completed for user {user_id}: {classificacao['item']} ({classificacao['confianca']:.2%})")
+        
         return ProcessResponse(
             status="sucesso",
             categoria=classificacao["item"],
@@ -339,13 +383,13 @@ def processar_produto(
             confianca=classificacao["confianca"],
             imagem_base64=imagem_base64,
             ficha_tecnica=ficha,
-            mensagem="Imagem processada com sucesso!"
+            mensagem=f"Imagem processada com sucesso! user_id={user_id}"
         )
         
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[PROCESS] Erro: {e}")
+        print(f"[PROCESS] Erro para user {user_id}: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Erro ao processar imagem: {str(e)}"
@@ -354,13 +398,15 @@ def processar_produto(
 
 @app.post("/classify")
 def classificar_apenas(
-    file: UploadFile = File(..., description="Imagem para classificar")
+    file: UploadFile = File(..., description="Imagem para classificar"),
+    user_id: str = Depends(get_current_user_id)
 ):
     """
     Endpoint para apenas classificar uma imagem (sem processar).
     Útil para testes rápidos da classificação.
     
     NOTA: Rota síncrona para evitar bloqueio do Event Loop.
+    Requer autenticação JWT (se AUTH_ENABLED=true).
     """
     if not classifier_service:
         raise HTTPException(
@@ -386,21 +432,27 @@ def classificar_apenas(
     
     resultado = classifier_service.classificar(content, file.content_type)
     
+    # Log de auditoria
+    print(f"[CLASSIFY] Classification by user {user_id}: {resultado['item']} ({resultado['confianca']:.2%})")
+    
     return {
         "status": "sucesso",
-        "classificacao": resultado
+        "classificacao": resultado,
+        "user_id": user_id
     }
 
 
 @app.post("/remove-background")
 def remover_fundo_apenas(
-    file: UploadFile = File(..., description="Imagem para remover fundo")
+    file: UploadFile = File(..., description="Imagem para remover fundo"),
+    user_id: str = Depends(get_current_user_id)
 ):
     """
     Endpoint para apenas remover o fundo de uma imagem.
     Retorna a imagem com fundo branco em base64.
     
     NOTA: Rota síncrona para evitar bloqueio do Event Loop.
+    Requer autenticação JWT (se AUTH_ENABLED=true).
     """
     if not background_service:
         raise HTTPException(
@@ -427,9 +479,51 @@ def remover_fundo_apenas(
     _, imagem_bytes = background_service.processar(content)
     imagem_base64 = base64.b64encode(imagem_bytes).decode("utf-8")
     
+    # Log de auditoria
+    print(f"[REMOVE-BG] Background removed for user {user_id}")
+    
     return {
         "status": "sucesso",
-        "imagem_base64": imagem_base64
+        "imagem_base64": imagem_base64,
+        "user_id": user_id
+    }
+
+
+# =============================================================================
+# Auth Test Endpoints
+# =============================================================================
+
+@app.get("/auth/test")
+def test_auth(user_id: str = Depends(get_current_user_id)):
+    """
+    Endpoint para testar autenticação.
+    
+    Uso:
+    curl -H "Authorization: Bearer YOUR_JWT" http://localhost:8000/auth/test
+    
+    Com AUTH_ENABLED=false: Retorna user_id fake (dev mode)
+    Com AUTH_ENABLED=true: Requer token JWT válido
+    """
+    return {
+        "status": "authenticated",
+        "user_id": user_id,
+        "message": "Token JWT válido!"
+    }
+
+
+@app.get("/public/ping")
+def public_ping():
+    """
+    Endpoint público (sem auth) para testar conectividade.
+    
+    Uso:
+    curl http://localhost:8000/public/ping
+    """
+    return {
+        "status": "pong",
+        "service": "Frida Orchestrator",
+        "version": "0.5.0",
+        "auth_required": settings.AUTH_ENABLED
     }
 
 

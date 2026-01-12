@@ -17,6 +17,7 @@
 -   **Image Logic:** `rembg` (Background Removal), `Pillow` (Manipulation + Deep Validation)
 -   **Templating:** Jinja2
 -   **Storage:** Supabase (PostgreSQL + Object Storage)
+-   **Authentication:** Supabase Auth (JWT validation via `PyJWT` + `cryptography`)
 -   **Environment:** `python-dotenv`
 
 ## Directory Structure
@@ -67,6 +68,8 @@ Create the `historico_geracoes` table and `processed-images` bucket:
 CREATE TABLE historico_geracoes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     created_at TIMESTAMPTZ DEFAULT NOW(),
+    user_id UUID,                          -- User who processed the image
+    product_id UUID,                       -- Associated product (optional)
     categoria VARCHAR(50),
     estilo VARCHAR(20),
     confianca FLOAT,
@@ -75,6 +78,21 @@ CREATE TABLE historico_geracoes (
     image_filename TEXT,
     processing_time_ms INTEGER
 );
+
+-- Indexes for common queries
+CREATE INDEX idx_historico_user ON historico_geracoes(user_id);
+CREATE INDEX idx_historico_product ON historico_geracoes(product_id);
+CREATE INDEX idx_historico_created ON historico_geracoes(created_at DESC);
+```
+
+**Migration (if table already exists):**
+```sql
+ALTER TABLE historico_geracoes 
+ADD COLUMN IF NOT EXISTS user_id UUID,
+ADD COLUMN IF NOT EXISTS product_id UUID;
+
+CREATE INDEX IF NOT EXISTS idx_historico_user ON historico_geracoes(user_id);
+CREATE INDEX IF NOT EXISTS idx_historico_product ON historico_geracoes(product_id);
 ```
 
 ### 4. Running the Server

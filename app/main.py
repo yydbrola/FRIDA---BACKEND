@@ -16,6 +16,7 @@ from app.utils import validate_image_file, validate_image_deep, generate_filenam
 from app.services.classifier import ClassifierService
 from app.services.background_remover import BackgroundRemoverService
 from app.services.tech_sheet import TechSheetService
+from app.services.storage import StorageService
 
 
 # =============================================================================
@@ -76,6 +77,7 @@ class StartupError(Exception):
 classifier_service: Optional[ClassifierService] = None
 background_service: Optional[BackgroundRemoverService] = None
 tech_sheet_service: Optional[TechSheetService] = None
+storage_service: Optional[StorageService] = None
 
 
 @app.on_event("startup")
@@ -91,7 +93,7 @@ async def startup_event():
     A API NÃO inicia em estado inconsistente. Isso garante que problemas
     de configuração sejam detectados imediatamente no deploy.
     """
-    global classifier_service, background_service, tech_sheet_service
+    global classifier_service, background_service, tech_sheet_service, storage_service
     
     print("[STARTUP] Iniciando Frida Orchestrator v0.5.0...")
     
@@ -148,9 +150,14 @@ async def startup_event():
     # ==========================================================================
     
     if not settings.SUPABASE_URL or not settings.SUPABASE_KEY:
-        print("[STARTUP] ⚠ Supabase não configurado (storage opcional desabilitado)")
+        print("[STARTUP] ⚠ Supabase não configurado (storage e auditoria desabilitados)")
     else:
-        print("[STARTUP] ✓ Supabase configurado")
+        try:
+            storage_service = StorageService()
+            print("[STARTUP] ✓ StorageService inicializado")
+        except Exception as e:
+            print(f"[STARTUP] ⚠ StorageService não inicializado (opcional): {e}")
+            # Não bloqueia - storage é opcional
     
     print("[STARTUP] ======================================")
     print("[STARTUP] ✓ Todos os serviços inicializados com sucesso!")
@@ -206,6 +213,7 @@ async def health_check():
         "classifier": "ok" if classifier_service else "unavailable",
         "background_remover": "ok" if background_service else "unavailable",
         "tech_sheet": "ok" if tech_sheet_service else "unavailable",
+        "storage": "ok" if storage_service else "not_configured",
         "supabase": "ok" if (settings.SUPABASE_URL and settings.SUPABASE_KEY) else "not_configured"
     }
     
@@ -302,6 +310,27 @@ def processar_produto(
         
         # 6. Converte imagem para base64
         imagem_base64 = base64.b64encode(imagem_bytes).decode("utf-8")
+        
+        # 7. Registra no Supabase para auditoria (opcional, não bloqueante)
+        storage_url = None
+        if storage_service:
+            try:
+                print("[PROCESS] Registrando no Supabase para auditoria...")
+                storage_result = storage_service.processar_e_registrar(
+                    image_bytes=imagem_bytes,
+                    categoria=classificacao["item"],
+                    estilo=classificacao["estilo"],
+                    confianca=classificacao["confianca"],
+                    ficha_tecnica=ficha,
+                    original_filename=file.filename
+                )
+                if storage_result["success"]:
+                    storage_url = storage_result["image_url"]
+                    print(f"[PROCESS] ✓ Registrado: {storage_result['record_id']}")
+                else:
+                    print(f"[PROCESS] ⚠ Falha no registro: {storage_result['error']}")
+            except Exception as e:
+                print(f"[PROCESS] ⚠ Erro no storage (não bloqueante): {e}")
         
         return ProcessResponse(
             status="sucesso",

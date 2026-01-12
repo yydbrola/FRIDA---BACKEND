@@ -38,6 +38,7 @@ class ClassificationResult(TypedDict):
 
 # Schema para Gemini Structured Output
 # O Gemini usa este schema para garantir que a resposta seja JSON válido
+# NOTA: minimum/maximum não são suportados na versão 0.8.0 da biblioteca
 CLASSIFICATION_SCHEMA = {
     "type": "object",
     "properties": {
@@ -53,8 +54,6 @@ CLASSIFICATION_SCHEMA = {
         },
         "confianca": {
             "type": "number",
-            "minimum": 0.0,
-            "maximum": 1.0,
             "description": "Nível de confiança da classificação entre 0.0 e 1.0"
         }
     },

@@ -8,6 +8,7 @@
 2.  **Image Processing:** Automated background removal using `rembg` (U2NET) and standardizing images with a pure white background using `Pillow`.
 3.  **Tech Sheet Generation:** Generates premium technical data sheets (HTML/JSON) using Jinja2 templates.
 4.  **Audit Storage:** Persists processed images and tech sheets to Supabase for enterprise audit trail.
+5.  **Secure Authentication:** Validates Supabase JWT tokens to identify users and secure endpoints.
 
 ## Tech Stack
 -   **Runtime:** Python 3.12+
@@ -24,6 +25,9 @@
 ```
 componentes/
 ├── app/
+│   ├── auth/
+│   │   ├── __init__.py         # Auth module exports
+│   │   └── supabase.py         # JWT validation logic
 │   ├── services/
 │   │   ├── classifier.py       # Gemini API integration (Structured Output)
 │   │   ├── background_remover.py # rembg integration
@@ -39,6 +43,8 @@ componentes/
 ├── .env.example                # Template for env variables
 ├── requirements.txt            # Python dependencies
 ├── GEMINI.md                   # Project context for AI
+├── CLAUDE.md                   # Context for Claude Code
+├── FASE_DE_TESTES.md           # Testing protocols
 └── README.md                   # Project documentation
 ```
 
@@ -55,12 +61,14 @@ pip install -r requirements.txt
 ```
 
 ### 2. Configuration (.env)
-Required environment variables:
+**Required:**
 -   `GEMINI_API_KEY`: API Key for Google Gemini (Obrigatório para o startup).
+-   `AUTH_ENABLED`: `true` or `false` (Dev mode).
 
-Optional (for audit storage):
+**Optional (for Prod/Audit):**
 -   `SUPABASE_URL`: Supabase project URL
 -   `SUPABASE_KEY`: Supabase anon/service key
+-   `SUPABASE_JWT_SECRET`: Secret for validating tokens (Required if AUTH_ENABLED=true)
 
 ### 3. Supabase Setup (for Audit)
 Create the `historico_geracoes` table and `processed-images` bucket:
@@ -85,16 +93,6 @@ CREATE INDEX idx_historico_product ON historico_geracoes(product_id);
 CREATE INDEX idx_historico_created ON historico_geracoes(created_at DESC);
 ```
 
-**Migration (if table already exists):**
-```sql
-ALTER TABLE historico_geracoes 
-ADD COLUMN IF NOT EXISTS user_id UUID,
-ADD COLUMN IF NOT EXISTS product_id UUID;
-
-CREATE INDEX IF NOT EXISTS idx_historico_user ON historico_geracoes(user_id);
-CREATE INDEX IF NOT EXISTS idx_historico_product ON historico_geracoes(product_id);
-```
-
 ### 4. Running the Server
 ```bash
 # Development mode with hot-reload
@@ -110,22 +108,34 @@ Logic is strictly separated into the `app/services/` directory. `main.py` handle
 
 ### Image Processing Pipeline
 1. **Input:** Multipart Form Data (Image + Options).
-2. **Deep Validation:** Checks **Magic Numbers** (file signatures) and **Pillow Integrity** to prevent spoofing.
-3. **Classification:** Gemini identifies category/style using Structured Output (native JSON).
-4. **Segmentation:** `rembg` removes the background.
-5. **Composition:** `Pillow` applies a #FFFFFF (pure white) background.
-6. **Output:** Base64 encoded string of the processed image.
-7. **Audit (Optional):** `StorageService` persists image and metadata to Supabase.
+2. **Authentication:** Validates JWT (if enabled) and extracts `user_id`.
+3. **Deep Validation:** Checks **Magic Numbers** (file signatures) and **Pillow Integrity** to prevent spoofing.
+4. **Classification:** Gemini identifies category/style using Structured Output (native JSON).
+5. **Segmentation:** `rembg` removes the background.
+6. **Composition:** `Pillow` applies a #FFFFFF (pure white) background.
+7. **Output:** Base64 encoded string of the processed image.
+8. **Audit (Optional):** `StorageService` persists image and metadata to Supabase.
 
 ### Reliability & Performance
 -   **Fail-Fast Startup:** The API will NOT start if `GEMINI_API_KEY` is missing or if critical services (`rembg`, `Classifier`, `TechSheet`) fail to initialize.
 -   **CPU-Bound Optimization:** Processing routes use `def` instead of `async def` to allow FastAPI to manage them in a separate thread pool, preventing Event Loop blocking during heavy image manipulation.
 -   **Structured AI:** Native Gemini `response_schema` ensures the AI always returns valid, typed JSON, eliminating the need for Regex parsing.
+-   **Authentication Module:** `app/auth/` handles JWT validation. In Dev Mode (`AUTH_ENABLED=false`), returns a fake `user_id` to simplify testing.
 
 ### Health Check
 -   Accessible at `/health`.
 -   Returns detailed status of each service (`classifier`, `background_remover`, `tech_sheet`, `storage`, `supabase`).
 -   Includes a `ready` flag (true only if all critical services are operational).
+
+## Testing Protocol (v0.5.0)
+
+See `FASE_DE_TESTES.md` for full details. Validated capabilities include:
+-   **Health & Connectivity:** Root, Ping, Health checks.
+-   **Authentication:** Dev mode (bypass) vs Prod mode (JWT validation).
+-   **Classification:** Correctly identifies Bag/Lunchbox/Bottle and Sketch/Photo.
+-   **Security:** Rejects fake files (text disguised as jpg) and corrupted images via Deep Validation.
+-   **Formats:** Supports PNG, JPEG, and WebP.
+-   **Process:** End-to-end pipeline (Upload -> Classify -> Remove BG -> Tech Sheet -> Return).
 
 ## Common Tasks & Commands
 
@@ -145,4 +155,3 @@ curl -X POST "http://localhost:8000/process" \
      -F "file=@image.jpg" \
      -F "gerar_ficha=true"
 ```
-

@@ -4,36 +4,37 @@
 **Frida Orchestrator** is a FastAPI-based backend service designed for the fashion industry (specifically bags, lunchboxes, and thermos). It serves as the intelligence core for the Frida platform, handling image processing, AI classification, and technical documentation generation.
 
 ### Key Capabilities
-1.  **AI Classification:** Uses Google's Gemini API to classify product images by category (e.g., Bag, Lunchbox) and style (Sketch vs. Photo).
+1.  **AI Classification:** Uses Google's Gemini API with **Structured Output** to classify product images by category (e.g., Bag, Lunchbox) and style (Sketch vs. Photo) with 100% JSON reliability.
 2.  **Image Processing:** Automated background removal using `rembg` (U2NET) and standardizing images with a pure white background using `Pillow`.
-3.  **Tech Sheet Generation:** Generates premium technical data sheets (HTML/PDF) using Jinja2 templates and WeasyPrint.
+3.  **Tech Sheet Generation:** Generates premium technical data sheets (HTML/PDF) using Jinja2 templates.
 
 ## Tech Stack
 -   **Runtime:** Python 3.12+
--   **Web Framework:** FastAPI
+-   **Web Framework:** FastAPI (optimized with Sync Routes for CPU-bound tasks)
 -   **Server:** Uvicorn
--   **AI Model:** Google Generative AI (Gemini)
--   **Image Logic:** `rembg` (Background Removal), `Pillow` (Manipulation)
+-   **AI Model:** Google Generative AI (Gemini 1.5 Flash + Structured Output)
+-   **Image Logic:** `rembg` (Background Removal), `Pillow` (Manipulation + Deep Validation)
 -   **Templating:** Jinja2
--   **PDF Engine:** WeasyPrint
--   **Database/Storage:** Supabase (Client library included)
+-   **Environment:** `python-dotenv`
 
 ## Directory Structure
 ```
 componentes/
 ├── app/
 │   ├── services/
-│   │   ├── classifier.py       # Gemini API integration
+│   │   ├── classifier.py       # Gemini API integration (Structured Output)
 │   │   ├── background_remover.py # rembg integration
-│   │   └── tech_sheet.py       # Jinja2 + WeasyPrint logic
+│   │   └── tech_sheet.py       # Jinja2 logic
 │   ├── templates/
 │   │   └── tech_sheet_premium.html
-│   ├── main.py                 # FastAPI entry point & routes
+│   ├── main.py                 # FastAPI entry point (Fail-Fast Startup)
 │   ├── config.py               # Settings management
-│   └── utils.py                # Helpers (validation, filenames)
-├── venv/                       # Virtual environment
+│   └── utils.py                # Helpers (Deep Validation, image manipulation)
+├── venv/                       # Virtual environment (ignored by git)
 ├── .env                        # Environment variables (API Keys)
+├── .env.example                # Template for env variables
 ├── requirements.txt            # Python dependencies
+├── GEMINI.md                   # Project context for AI
 └── README.md                   # Project documentation
 ```
 
@@ -51,8 +52,7 @@ pip install -r requirements.txt
 
 ### 2. Configuration (.env)
 Required environment variables:
--   `GEMINI_API_KEY`: API Key for Google Gemini.
--   `SUPABASE_URL` / `SUPABASE_KEY`: If database features are enabled.
+-   `GEMINI_API_KEY`: API Key for Google Gemini (Obrigatório para o startup).
 
 ### 3. Running the Server
 ```bash
@@ -65,20 +65,27 @@ Swagger UI: `http://localhost:8000/docs`
 ## Key Implementation Details
 
 ### Service Pattern
-Logic is strictly separated into the `app/services/` directory. `main.py` should only handle request parsing and response formatting, delegating complex logic to services.
+Logic is strictly separated into the `app/services/` directory. `main.py` handles request parsing and response formatting, delegating complex logic to specific services.
 
-### Initialization
-Services (`ClassifierService`, `BackgroundRemoverService`) are initialized during the FastAPI `startup` event to preload models and validate configurations.
+### Image Processing Pipeline
+1. **Input:** Multipart Form Data (Image + Options).
+2. **Deep Validation:** Checks **Magic Numbers** (file signatures) and **Pillow Integrity** to prevent spoofing.
+3. **Classification:** Gemini identifies category/style using Structured Output (native JSON).
+4. **Segmentation:** `rembg` removes the background.
+5. **Composition:** `Pillow` applies a #FFFFFF (pure white) background.
+6. **Output:** Base64 encoded string of the processed image.
 
-### Error Handling
--   Use `HTTPException` for expected API errors.
--   Global exception handlers catch unhandled errors to prevent server crashes.
--   `rembg` model download happens on the first run; timeouts should be handled gracefully.
+### Reliability & Performance
+-   **Fail-Fast Startup:** The API will NOT start if `GEMINI_API_KEY` is missing or if critical services (`rembg`, `Classifier`, `TechSheet`) fail to initialize.
+-   **CPU-Bound Optimization:** Processing routes use `def` instead of `async def` to allow FastAPI to manage them in a separate thread pool, preventing Event Loop blocking during heavy image manipulation.
+-   **Structured AI:** Native Gemini `response_schema` ensures the AI always returns valid, typed JSON, eliminating the need for Regex parsing.
+
+### Health Check
+-   Accessible at `/health`.
+-   Returns detailed status of each service (`classifier`, `background_remover`, `tech_sheet`, `supabase`).
+-   Includes a `ready` flag (true only if all critical services are operational).
 
 ## Common Tasks & Commands
-
-**Run Linter/Formatter (if applicable):**
-*Currently relying on standard Python tooling. Ensure PEP8 compliance.*
 
 **Add New Dependency:**
 ```bash
@@ -92,5 +99,7 @@ pip freeze > requirements.txt
 curl http://localhost:8000/health
 
 # Process Image
-curl -X POST "http://localhost:8000/process" -F "file=@image.jpg"
+curl -X POST "http://localhost:8000/process" \
+     -F "file=@image.jpg" \
+     -F "gerar_ficha=true"
 ```

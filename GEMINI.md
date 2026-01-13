@@ -36,7 +36,7 @@ componentes/
 ├── app/
 │   ├── auth/
 │   │   ├── __init__.py         # Auth module exports
-│   │   ├── permissions.py      # RBAC decorators (@require_admin)
+│   │   ├── permissions.py      # RBAC dependency factories (require_admin, require_role)
 │   │   └── supabase.py         # JWT validation + AuthUser model
 │   ├── services/
 │   │   ├── __init__.py
@@ -62,7 +62,7 @@ componentes/
 ├── requirements.txt            # Python dependencies
 ├── GEMINI.md                   # Project context for AI
 ├── CLAUDE.md                   # Context for Claude Code
-├── CODE_REVIEW.md              # Comprehensive code review (score: 8.2/10)
+├── CODE_REVIEW.md              # Comprehensive code review (score: 8.6/10)
 ├── FASE_DE_TESTES.md           # Testing protocols v0.5.0
 └── README.md                   # Project documentation
 ```
@@ -227,9 +227,10 @@ ProductStatus.values()                # ["draft", "pending", "approved", "reject
 ## Known Issues
 
 1. ~~**RBAC Decorators**~~ ✅ FIXED in v0.5.2: Refactored to Dependency Factory pattern. Use `Depends(require_admin)` or `Depends(require_role("admin"))`.
-2. **Image Segmentation with Models**: rembg includes people in lifestyle photos. Consider Gemini Vision for product detection.
+2. **Rate Limiting Not Implemented** ⚠️: Only remaining security blocker. Vulnerable to API abuse. Recommended: `slowapi` library.
+3. **Image Segmentation with Models**: rembg includes people in lifestyle photos. Consider Gemini Vision for product detection.
 
 ## Related Documentation
 - `CLAUDE.md` - Detailed project context (1000+ lines)
-- `CODE_REVIEW.md` - Comprehensive code analysis (score: 8.2/10)
+- `CODE_REVIEW.md` - Comprehensive code analysis (score: 8.6/10)
 - `FASE_DE_TESTES.md` - Testing protocols and progress

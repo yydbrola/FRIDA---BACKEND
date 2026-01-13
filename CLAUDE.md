@@ -35,7 +35,7 @@ componentes/
 │   ├── auth/
 │   │   ├── __init__.py
 │   │   ├── supabase.py              # JWT validation + AuthUser model
-│   │   └── permissions.py           # RBAC decorators (@require_admin)
+│   │   └── permissions.py           # RBAC dependency factories (require_admin, require_role)
 │   ├── services/
 │   │   ├── __init__.py
 │   │   ├── classifier.py            # Gemini Vision + Structured Output
@@ -109,7 +109,7 @@ All business logic lives in `app/services/`. The `main.py` handles HTTP routing 
 
 - **Auth Service** (`auth/supabase.py`): JWT validation via PyJWT + user lookup in `users` table. Returns `AuthUser` model with `user_id`, `email`, `role`, and `name`. Supports dev mode with fake user. Enforces that authenticated users must exist in the `users` table (HTTP 403 if not found).
 
-- **Permissions Module** (`auth/permissions.py`): RBAC (Role-Based Access Control) decorators for route protection. Provides `@require_admin`, `@require_user`, and `@require_any` decorators. Validates user role from database before allowing access.
+- **Permissions Module** (`auth/permissions.py`): RBAC (Role-Based Access Control) via FastAPI Dependency Factories. Provides `require_admin`, `require_user`, `require_any`, and `require_role(*roles)` as dependencies. Use with `Depends()` for route protection.
 
 ### Processing Pipeline
 
@@ -423,13 +423,32 @@ StorageResult = {
 
 ### 🔴 High Priority
 
-**1. Tech Sheet Fields Require Rework**
+**1. Rate Limiting Not Implemented** ⚠️
+- **Source:** CODE_REVIEW.md - Only remaining security blocker
+- **Issue:** No rate limiting on API endpoints, vulnerable to abuse and excessive API costs
+- **Impact:** Gemini API calls can be spammed, causing high costs
+- **Status:** ❌ NOT IMPLEMENTED
+- **Recommended Solution:** Implement with `slowapi` library:
+  ```python
+  from slowapi import Limiter
+  limiter = Limiter(key_func=get_remote_address)
+
+  @app.post("/classify")
+  @limiter.limit("10/minute")
+  def classify_image(...): ...
+
+  @app.post("/process")
+  @limiter.limit("5/minute")
+  def process_image(...): ...
+  ```
+
+**2. Tech Sheet Fields Require Rework**
 - **Source:** FASE_DE_TESTES.md, test 4.2
 - **Issue:** Current fields (`nome`, `materiais`, `cores`, `dimensoes`, `detalhes`) are generic and need customization for Carol's specific requirements.
 - **Status:** Functional for validation, **will be updated**
 - **Files to modify:** `app/services/tech_sheet.py`, `app/templates/tech_sheet_premium.html`
 
-**2. Image Quality Issues with Models in Background**
+**3. Image Quality Issues with Models in Background**
 - **Source:** FASE_DE_TESTES.md, test 4.4
 - **Issue:** When input image contains a person/model next to the product, rembg includes both in segmentation, causing distortion in 1080x1080 composition.
 - **Impact:** Works perfectly for isolated products, but fails with lifestyle photos
@@ -442,28 +461,28 @@ StorageResult = {
 
 ### 🟡 Medium Priority
 
-**3. Complete Storage Testing**
+**4. Complete Storage Testing**
 - Category 6 tests pending (Supabase integration)
 - Requires: SUPABASE_URL, SUPABASE_KEY configuration
 - Validates: Upload to bucket, audit trail in `historico_geracoes`
 
-**4. Edge Cases & Load Testing**
+**5. Edge Cases & Load Testing**
 - File size limits (>10MB)
 - Concurrent request handling
 - Invalid Content-Type scenarios
 
-**5. Production Deployment Documentation**
+**6. Production Deployment Documentation**
 - Deployment guide (Docker, cloud services)
 - Monitoring and logging setup
 - Performance optimization recommendations
 
 ### 🟢 Low Priority
 
-**6. Model Caching Optimization**
+**7. Model Caching Optimization**
 - rembg downloads U2NET model (~170MB) on first run
 - Consider pre-loading in Docker image
 
-**7. Image Generation Feature**
+**8. Image Generation Feature**
 - GEMINI_MODEL_IMAGE_GEN configured but not implemented
 - Experimental feature for future consideration
 

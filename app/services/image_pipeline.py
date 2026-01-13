@@ -11,6 +11,7 @@ Todas as versões são registradas na tabela 'images'.
 """
 
 import uuid
+import threading
 from datetime import datetime
 from typing import Optional, Dict, Any
 from dataclasses import dataclass, field
@@ -43,7 +44,7 @@ BUCKETS = {
 class PipelineResult:
     """
     Resultado do processamento completo do pipeline.
-    
+
     Attributes:
         success: Se o pipeline completou com sucesso
         product_id: ID do produto processado
@@ -56,7 +57,7 @@ class PipelineResult:
     images: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     quality_report: Optional[QualityReport] = None
     error: Optional[str] = None
-    
+
     def to_dict(self) -> dict:
         """Converte para dicionário serializável."""
         return {
@@ -75,20 +76,24 @@ class PipelineResult:
 class ImagePipelineSync:
     """
     Pipeline síncrono de processamento de imagem (MVP).
-    
+
     Processa imagem em 3 estágios, salvando cada versão no
     Supabase Storage e registrando na tabela images.
     """
-    
+
     def __init__(self):
-        """Inicializa o pipeline."""
+        """Inicializa o pipeline com thread-safe client loading."""
         self._client = None
-    
+        self._client_lock = threading.Lock()
+
     @property
     def client(self):
-        """Lazy load do Supabase client."""
+        """Thread-safe lazy load do Supabase client."""
         if self._client is None:
-            self._client = get_supabase_client()
+            with self._client_lock:
+                # Double-check locking pattern
+                if self._client is None:
+                    self._client = get_supabase_client()
         return self._client
     
     # ==========================================================================
@@ -158,10 +163,19 @@ class ImagePipelineSync:
             # STAGE 2: Segmentação (rembg)
             # =================================================================
             print("[PIPELINE] Stage 2: Removendo fundo...")
-            
-            # Remover fundo usando rembg
-            segmented_bytes = remove(image_bytes)
-            
+
+            # Remover fundo usando rembg com tratamento de erro específico
+            try:
+                segmented_bytes = remove(image_bytes)
+            except MemoryError as e:
+                raise RuntimeError(f"Memória insuficiente para processar imagem: {e}")
+            except Exception as e:
+                # rembg pode falhar por vários motivos: modelo não carregado, imagem corrompida, etc.
+                raise RuntimeError(f"Erro na segmentação (rembg): {e}")
+
+            if not segmented_bytes:
+                raise RuntimeError("Segmentação retornou imagem vazia")
+
             segmented_path = f"{product_id}/{timestamp}_segmented.png"
             segmented_url = self._upload_to_storage(
                 bucket=BUCKETS["segmented"],
@@ -320,8 +334,9 @@ class ImagePipelineSync:
                     self.client.table('images').update({
                         'quality_score': quality_score
                     }).eq('id', record['id']).execute()
-                except Exception:
-                    pass  # Não falhar por causa do score
+                except Exception as e:
+                    # Logar erro mas não falhar o pipeline por causa do score
+                    print(f"[PIPELINE] ⚠️ Erro ao atualizar quality_score: {e}")
             
             return record
             

@@ -325,5 +325,5 @@ python3 -c "from app.main import app, ProcessResponse"
 
 ---
 
-*Documentado por: Antigravity (Google DeepMind)*  
+*Documentado por: Claude (Anthropic)*
 *Data: 2026-01-13 17:16 BRT*

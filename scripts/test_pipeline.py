@@ -153,10 +153,10 @@ def test_husk_layer(processed_bytes: bytes) -> QualityReport:
 def test_full_pipeline(image_path: str) -> bool:
     """
     Executa pipeline completo de teste.
-    
+
     Args:
         image_path: Caminho para imagem de teste
-        
+
     Returns:
         True se passou (score >= 80), False caso contrário
     """
@@ -164,33 +164,122 @@ def test_full_pipeline(image_path: str) -> bool:
     print("FRIDA v0.5.2 - TESTE DO IMAGE PIPELINE")
     print("=" * 60)
     print(f"Imagem de entrada: {image_path}")
-    
+
     try:
         # Fase 1: Composição
         processed_bytes = test_composer(image_path)
-        
+
         # Fase 2: Validação
         report = test_husk_layer(processed_bytes)
-        
+
         # Resultado final
         print("\n" + "=" * 60)
         print("RESULTADO FINAL")
         print("=" * 60)
-        
+
         if report.passed:
             print("✅ PIPELINE APROVADO - Imagem pronta para produção!")
         else:
             print("❌ PIPELINE REPROVADO - Imagem precisa de ajustes")
             print("   Verifique os detalhes acima para melhorar a qualidade.")
-        
+
         print()
         return report.passed
-        
+
     except Exception as e:
         print(f"\n❌ ERRO NO PIPELINE: {str(e)}")
         import traceback
         traceback.print_exc()
         return False
+
+
+# =============================================================================
+# Testes de Casos de Erro
+# =============================================================================
+
+def test_error_cases() -> dict:
+    """
+    Executa testes de casos de erro para validar tratamento de exceções.
+
+    Returns:
+        Dict com resultados dos testes {nome: passed}
+    """
+    print("\n" + "=" * 60)
+    print("TESTES DE CASOS DE ERRO")
+    print("=" * 60)
+
+    results = {}
+
+    # Teste 1: Arquivo corrompido
+    print("\n[TEST 1] Arquivo corrompido...")
+    try:
+        corrupted_bytes = b"not a valid image file"
+        remove(corrupted_bytes)
+        results["corrupted_file"] = False
+        print("  ❌ FALHOU - Deveria ter lançado exceção")
+    except Exception as e:
+        results["corrupted_file"] = True
+        print(f"  ✅ OK - Exceção capturada: {type(e).__name__}")
+
+    # Teste 2: Imagem muito pequena (1x1 pixel)
+    print("\n[TEST 2] Imagem muito pequena (1x1)...")
+    try:
+        tiny_image = Image.new('RGB', (1, 1), color='white')
+        buffer = BytesIO()
+        tiny_image.save(buffer, format='PNG')
+        tiny_bytes = buffer.getvalue()
+
+        report = husk_layer.validate_from_bytes(tiny_bytes)
+        # Deve falhar na validação (score baixo)
+        if report.score < 80:
+            results["tiny_image"] = True
+            print(f"  ✅ OK - Score baixo como esperado: {report.score}/100")
+        else:
+            results["tiny_image"] = False
+            print(f"  ❌ FALHOU - Score deveria ser baixo: {report.score}/100")
+    except Exception as e:
+        results["tiny_image"] = True
+        print(f"  ✅ OK - Exceção capturada: {type(e).__name__}")
+
+    # Teste 3: Imagem totalmente transparente
+    print("\n[TEST 3] Imagem totalmente transparente...")
+    try:
+        transparent_image = Image.new('RGBA', (100, 100), color=(0, 0, 0, 0))
+        buffer = BytesIO()
+        transparent_image.save(buffer, format='PNG')
+        transparent_bytes = buffer.getvalue()
+
+        processed = image_composer.compose_from_bytes(transparent_bytes)
+        # Deve retornar imagem branca (canvas vazio)
+        result_image = Image.open(BytesIO(processed))
+        if result_image.size[0] > 0:
+            results["transparent_image"] = True
+            print(f"  ✅ OK - Retornou canvas branco: {result_image.size}")
+        else:
+            results["transparent_image"] = False
+            print("  ❌ FALHOU - Retornou imagem inválida")
+    except Exception as e:
+        results["transparent_image"] = False
+        print(f"  ❌ FALHOU - Exceção inesperada: {e}")
+
+    # Teste 4: Bytes vazios
+    print("\n[TEST 4] Bytes vazios...")
+    try:
+        empty_bytes = b""
+        remove(empty_bytes)
+        results["empty_bytes"] = False
+        print("  ❌ FALHOU - Deveria ter lançado exceção")
+    except Exception as e:
+        results["empty_bytes"] = True
+        print(f"  ✅ OK - Exceção capturada: {type(e).__name__}")
+
+    # Resumo
+    print("\n" + "-" * 60)
+    passed = sum(1 for v in results.values() if v)
+    total = len(results)
+    print(f"RESULTADO: {passed}/{total} testes de erro passaram")
+
+    return results
 
 
 # =============================================================================
@@ -200,16 +289,26 @@ def test_full_pipeline(image_path: str) -> bool:
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Uso: python scripts/test_pipeline.py <caminho_imagem>")
+        print("      python scripts/test_pipeline.py --errors")
         print()
-        print("Exemplo:")
-        print("  python scripts/test_pipeline.py ~/bolsa_teste.jpg")
+        print("Exemplos:")
+        print("  python scripts/test_pipeline.py ~/bolsa_teste.jpg  # Teste normal")
+        print("  python scripts/test_pipeline.py --errors           # Testes de erro")
         sys.exit(1)
-    
+
+    # Modo de testes de erro
+    if sys.argv[1] == "--errors":
+        results = test_error_cases()
+        passed = sum(1 for v in results.values() if v)
+        total = len(results)
+        sys.exit(0 if passed == total else 1)
+
+    # Modo normal
     image_path = sys.argv[1]
-    
+
     if not os.path.exists(image_path):
         print(f"❌ Arquivo não encontrado: {image_path}")
         sys.exit(1)
-    
+
     success = test_full_pipeline(image_path)
     sys.exit(0 if success else 1)

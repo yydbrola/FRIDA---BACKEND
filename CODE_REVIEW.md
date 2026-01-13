@@ -1,9 +1,31 @@
 # Code Review - Frida Orchestrator
 
-**Versao:** 0.5.0
-**Data:** 2026-01-12
+**Versao:** 0.5.1
+**Data:** 2026-01-13 (Revisao 2)
 **Revisor:** Claude Code (Opus 4.5)
 **Status do Projeto:** Em desenvolvimento (64% testes passando)
+
+---
+
+## Changelog da Revisao
+
+### Atualizacoes desde 2026-01-12
+
+| Mudanca | Tipo | Arquivo(s) |
+|---------|------|------------|
+| Novos endpoints `/products` e `/products/{id}` | Feature | `main.py` |
+| Funcoes `create_product`, `get_user_products`, `create_image` | Feature | `database.py` |
+| Tabelas `products` e `images` com RLS | Schema | `04_create_products.sql`, `05_create_images.sql` |
+| Model `AuthUser` com role para RBAC | Enhancement | `auth/supabase.py` |
+| GEMINI.md atualizado para v0.5.1 | Docs | `GEMINI.md` |
+| Integracao de product_id no fluxo `/process` | Enhancement | `main.py`, `storage.py` |
+
+### Bugs Criticos - Status
+
+| Bug | Status | Observacao |
+|-----|--------|------------|
+| JSON Parsing (regex) | ❌ NAO CORRIGIDO | `utils.py:62` |
+| RBAC Decorators | ❌ NAO CORRIGIDO | `permissions.py:39` |
 
 ---
 
@@ -279,28 +301,80 @@ if not Settings.AUTH_ENABLED:
 
 ### 4.1 Metricas
 
-| Arquivo | Linhas | Funcao |
-|---------|--------|--------|
-| main.py | 670 | Rotas e orquestracao |
-| supabase.py | 252 | Autenticacao JWT |
-| database.py | 238 | Acesso a dados |
-| utils.py | 241 | Utilitarios e validacao |
-| tech_sheet.py | 219 | Extracao + renderizacao |
-| classifier.py | 183 | Classificacao Gemini |
-| background_remover.py | 112 | Processamento de imagem |
-| permissions.py | 54 | RBAC (com bugs) |
-| config.py | 54 | Configuracao |
-| **Total Python** | **~2,300** | |
+| Arquivo | Linhas | Funcao | Mudanca |
+|---------|--------|--------|---------|
+| main.py | ~720 | Rotas e orquestracao | +2 endpoints |
+| supabase.py | 251 | Autenticacao JWT + AuthUser | Enhanced |
+| database.py | ~280 | Acesso a dados + CRUD produtos | +3 funcoes |
+| utils.py | 241 | Utilitarios e validacao | - |
+| tech_sheet.py | 219 | Extracao + renderizacao | - |
+| classifier.py | 183 | Classificacao Gemini | - |
+| storage.py | ~260 | Supabase storage | Enhanced |
+| background_remover.py | 112 | Processamento de imagem | - |
+| permissions.py | 54 | RBAC (com bugs) | - |
+| config.py | 54 | Configuracao | - |
+| **Total Python** | **~2,500** | | +200 linhas |
 
-### 4.2 Boas Praticas Observadas
+### 4.2 Novos Endpoints (v0.5.1)
+
+#### GET /products
+Lista todos os produtos do usuario autenticado.
+
+```python
+@app.get("/products")
+def list_products(user: AuthUser = Depends(get_current_user)):
+    products = get_user_products(user.user_id)
+    return {"status": "sucesso", "total": len(products), "products": products}
+```
+
+**Response:**
+```json
+{
+  "status": "sucesso",
+  "total": 5,
+  "products": [
+    {"id": "uuid", "name": "Bolsa Premium", "category": "bolsa", "status": "draft", ...}
+  ],
+  "user_id": "uuid"
+}
+```
+
+#### GET /products/{product_id}
+Retorna detalhes de um produto especifico.
+
+```python
+@app.get("/products/{product_id}")
+def get_product(product_id: str, user: AuthUser = Depends(get_current_user)):
+    # Validacao de ownership: usuario deve ser criador ou admin
+    ...
+```
+
+**Validacao de Acesso:**
+- Usuario comum: apenas seus proprios produtos
+- Admin: acesso a todos os produtos
+
+### 4.3 Novas Funcoes de Database (v0.5.1)
+
+| Funcao | Descricao | Tabela |
+|--------|-----------|--------|
+| `create_product(name, category, classification, user_id)` | Cria produto no banco | products |
+| `get_user_products(user_id)` | Lista produtos do usuario | products |
+| `create_image(product_id, type, bucket, path, user_id)` | Registra imagem | images |
+
+**Integracao com /process:**
+O endpoint `/process` agora cria automaticamente um registro na tabela `products` apos classificacao bem-sucedida.
+
+### 4.4 Boas Praticas Observadas
 
 1. **Type Hints** - Uso consistente de TypedDict e tipos
 2. **Docstrings** - Funcoes principais documentadas
 3. **Error Handling** - Try/except abrangente com logging
 4. **Logging** - Logs em pontos-chave do fluxo
 5. **Singleton Pattern** - Cliente Supabase reutilizado
+6. **Ownership Validation** - Novos endpoints validam propriedade do recurso
+7. **Workflow Status** - Produtos com lifecycle (draft → pending → approved → rejected → published)
 
-### 4.3 Melhorias Sugeridas
+### 4.5 Melhorias Sugeridas
 
 #### config.py - validate() nunca chamado
 
@@ -378,28 +452,85 @@ class Settings:
 
 ## 6. Database Schema
 
-### 6.1 Estrutura
+### 6.1 Estrutura Completa (v0.5.1)
 
 ```
 users (id, email, name, role, created_at)
   │
-  └── products (id, name, sku, category, classification_result, status, created_by)
-        │
-        └── images (id, product_id, type, storage_bucket, storage_path, quality_score)
+  ├── products (id, name, sku, category, classification_result, status, created_by, created_at, updated_at)
+  │     │
+  │     └── images (id, product_id, type, storage_bucket, storage_path, quality_score, created_by, created_at)
+  │
+  └── historico_geracoes (audit trail - storage service)
 ```
 
-### 6.2 Boas Praticas Implementadas
+### 6.2 Tabela Products (NOVA em v0.5.1)
 
-| Aspecto | Status |
-|---------|--------|
-| UUIDs como primary keys | ✅ |
-| RLS policies | ✅ |
-| Indices em campos de busca | ✅ |
-| Trigger de auto-update | ✅ |
-| ON DELETE CASCADE | ✅ |
-| CHECK constraints | ✅ |
+**Arquivo:** `SQL para o SUPABASE/04_create_products.sql`
 
-### 6.3 Sugestoes de Melhoria
+```sql
+CREATE TABLE public.products (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  sku TEXT UNIQUE,
+  category TEXT,
+  classification_result JSONB,  -- Resultado do Gemini
+  status TEXT DEFAULT 'draft' CHECK (status IN ('draft', 'pending', 'approved', 'rejected', 'published')),
+  created_by UUID REFERENCES public.users(id) NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+```
+
+**Workflow de Status:**
+```
+draft → pending → approved → published
+                ↘ rejected
+```
+
+**Indices:**
+- `idx_products_created_by` - Busca por usuario
+- `idx_products_status` - Filtro por status
+- `idx_products_category` - Filtro por categoria
+- `idx_products_sku` - Busca por SKU
+
+### 6.3 Tabela Images (NOVA em v0.5.1)
+
+**Arquivo:** `SQL para o SUPABASE/05_create_images.sql`
+
+```sql
+CREATE TABLE public.images (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  product_id UUID REFERENCES public.products(id) ON DELETE CASCADE NOT NULL,
+  type TEXT CHECK (type IN ('original', 'segmented', 'processed')) NOT NULL,
+  storage_bucket TEXT NOT NULL,
+  storage_path TEXT NOT NULL,
+  quality_score INTEGER CHECK (quality_score >= 0 AND quality_score <= 100),
+  created_by UUID REFERENCES public.users(id) NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+```
+
+**Tipos de Imagem:**
+| Tipo | Descricao |
+|------|-----------|
+| `original` | Imagem enviada pelo usuario |
+| `segmented` | Imagem apos rembg (fundo removido) |
+| `processed` | Imagem final (fundo branco, 1080x1080) |
+
+### 6.4 Boas Praticas Implementadas
+
+| Aspecto | Status | Observacao |
+|---------|--------|------------|
+| UUIDs como primary keys | ✅ | gen_random_uuid() |
+| RLS policies | ✅ | Usuarios veem apenas seus dados |
+| Indices em campos de busca | ✅ | 4 indices em products, 3 em images |
+| Trigger de auto-update | ✅ | updated_at em products |
+| ON DELETE CASCADE | ✅ | Images deletadas com produto |
+| CHECK constraints | ✅ | status, type, quality_score |
+| JSONB para dados flexiveis | ✅ | classification_result |
+
+### 6.5 Sugestoes de Melhoria
 
 #### Indice Composto para Queries Frequentes
 
@@ -422,6 +553,14 @@ ALTER TABLE products ADD COLUMN deleted_at TIMESTAMPTZ;
 -- Atualizar RLS para ignorar deletados
 CREATE POLICY "Ignore deleted" ON products
 FOR SELECT USING (deleted_at IS NULL);
+```
+
+#### Full-Text Search (Futuro)
+
+```sql
+-- Busca em nome e descricao de produtos
+ALTER TABLE products ADD COLUMN search_vector tsvector;
+CREATE INDEX idx_products_search ON products USING GIN(search_vector);
 ```
 
 ---
@@ -551,29 +690,72 @@ def classify_cached(image_hash: str, image_bytes: bytes):
 
 O **Frida Orchestrator** demonstra engenharia solida com arquitetura bem planejada e separacao de responsabilidades clara. O codigo e legivel, bem documentado e segue boas praticas de desenvolvimento Python.
 
-### Principais Riscos
+### Evolucao desde v0.5.0
+
+A versao 0.5.1 trouxe melhorias significativas:
+
+| Aspecto | Antes | Depois |
+|---------|-------|--------|
+| Gestao de Produtos | Apenas processamento | CRUD completo com lifecycle |
+| Rastreamento de Imagens | Nenhum | Tabela dedicada com tipos |
+| Autenticacao | user_id apenas | AuthUser completo com role |
+| Integracao DB | Basica | Produtos criados automaticamente |
+
+### Principais Riscos (Ainda Presentes)
 
 1. **Bug de JSON parsing** - Pode corromper dados de ficha tecnica com objetos aninhados
+   - **Status:** ❌ NAO CORRIGIDO em `utils.py:62`
+
 2. **RBAC nao funcional** - Decorators nao protegem rotas conforme esperado
+   - **Status:** ❌ NAO CORRIGIDO em `permissions.py:39`
+
 3. **Sem rate limiting** - Vulneravel a abuso e custos excessivos de API
+   - **Status:** ❌ NAO IMPLEMENTADO
 
 ### Veredicto
 
-Com as correcoes dos itens de alta prioridade, o projeto esta pronto para producao com as funcionalidades core. A qualidade do codigo e documentacao esta acima da media para um projeto em desenvolvimento.
+O projeto evoluiu bem com a adicao de gestao de produtos e integracao mais profunda com o banco de dados. **Porem, os dois bugs criticos identificados na revisao anterior ainda nao foram corrigidos** e devem ser priorizados antes do deploy em producao.
+
+Com as correcoes dos itens de alta prioridade, o projeto estara pronto para producao. A qualidade do codigo e documentacao continua acima da media.
 
 ---
 
-**Score Final: 7.5/10**
+**Score Final: 7.8/10** (↑0.3 desde v0.5.0)
 
-| Categoria | Nota |
-|-----------|------|
-| Arquitetura | 9/10 |
-| Codigo | 7/10 |
-| Seguranca | 6/10 |
-| Testes | 6/10 |
-| Documentacao | 9/10 |
-| Performance | 7/10 |
+| Categoria | Nota | Mudanca |
+|-----------|------|---------|
+| Arquitetura | 9/10 | - |
+| Codigo | 7.5/10 | ↑0.5 (novos endpoints bem estruturados) |
+| Seguranca | 6/10 | - (bugs ainda presentes) |
+| Testes | 6/10 | - |
+| Documentacao | 9/10 | - |
+| Performance | 7/10 | - |
+| **Database** | **9/10** | **NOVO** (schema bem desenhado) |
 
 ---
 
-*Revisao gerada por Claude Code (Opus 4.5) em 2026-01-12*
+## 11. Proximos Passos Recomendados
+
+### Imediato (Bloqueadores de Producao)
+
+1. ⚠️ **Corrigir `safe_json_parse()`** em `utils.py:62`
+2. ⚠️ **Refatorar RBAC decorators** em `permissions.py` ou remover codigo morto
+3. ⚠️ **Adicionar rate limiting** com slowapi
+
+### Curto Prazo
+
+4. Completar testes de Storage (Categoria 6)
+5. Adicionar testes para novos endpoints `/products`
+6. Implementar endpoint DELETE `/products/{id}`
+
+### Medio Prazo
+
+7. Adicionar paginacao em `GET /products`
+8. Implementar busca/filtro de produtos
+9. Dashboard de metricas
+
+---
+
+*Revisao gerada por Claude Code (Opus 4.5)*
+*Primeira revisao: 2026-01-12*
+*Atualizacao: 2026-01-13 (v0.5.1)*

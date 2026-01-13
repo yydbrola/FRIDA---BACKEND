@@ -24,8 +24,9 @@
 
 | Bug | Status | Observacao |
 |-----|--------|------------|
-| JSON Parsing (regex) | ❌ NAO CORRIGIDO | `utils.py:62` |
+| JSON Parsing (regex) | ✅ CORRIGIDO | `utils.py:50-115` - Algoritmo de contagem de chaves |
 | RBAC Decorators | ❌ NAO CORRIGIDO | `permissions.py:39` |
+| Enums para categorias | ✅ IMPLEMENTADO | `config.py` - ProductCategory, ProductStyle, ProductStatus, ImageType |
 
 ---
 
@@ -701,10 +702,11 @@ A versao 0.5.1 trouxe melhorias significativas:
 | Autenticacao | user_id apenas | AuthUser completo com role |
 | Integracao DB | Basica | Produtos criados automaticamente |
 
-### Principais Riscos (Ainda Presentes)
+### Principais Riscos (Atualizados)
 
-1. **Bug de JSON parsing** - Pode corromper dados de ficha tecnica com objetos aninhados
-   - **Status:** ❌ NAO CORRIGIDO em `utils.py:62`
+1. ~~**Bug de JSON parsing**~~ - ✅ **CORRIGIDO**
+   - Algoritmo de contagem de chaves substitui regex
+   - Suporta objetos aninhados corretamente
 
 2. **RBAC nao funcional** - Decorators nao protegem rotas conforme esperado
    - **Status:** ❌ NAO CORRIGIDO em `permissions.py:39`
@@ -712,25 +714,33 @@ A versao 0.5.1 trouxe melhorias significativas:
 3. **Sem rate limiting** - Vulneravel a abuso e custos excessivos de API
    - **Status:** ❌ NAO IMPLEMENTADO
 
+### Melhorias Implementadas
+
+1. ✅ **Enums centralizados** em `config.py`:
+   - `ProductCategory`: bolsa, lancheira, garrafa_termica, desconhecido
+   - `ProductStyle`: sketch, foto, desconhecido
+   - `ProductStatus`: draft, pending, approved, rejected, published
+   - `ImageType`: original, segmented, processed
+
 ### Veredicto
 
-O projeto evoluiu bem com a adicao de gestao de produtos e integracao mais profunda com o banco de dados. **Porem, os dois bugs criticos identificados na revisao anterior ainda nao foram corrigidos** e devem ser priorizados antes do deploy em producao.
+O projeto evoluiu significativamente. O bug critico de JSON parsing foi corrigido e Enums foram implementados para melhor manutencao. **Resta apenas o bug de RBAC decorators e rate limiting** para producao.
 
-Com as correcoes dos itens de alta prioridade, o projeto estara pronto para producao. A qualidade do codigo e documentacao continua acima da media.
+Com a correcao do RBAC (ou remocao do codigo morto), o projeto estara pronto para producao. A qualidade do codigo e documentacao continua acima da media.
 
 ---
 
-**Score Final: 7.8/10** (↑0.3 desde v0.5.0)
+**Score Final: 8.2/10** (↑0.7 desde v0.5.0)
 
 | Categoria | Nota | Mudanca |
 |-----------|------|---------|
 | Arquitetura | 9/10 | - |
-| Codigo | 7.5/10 | ↑0.5 (novos endpoints bem estruturados) |
-| Seguranca | 6/10 | - (bugs ainda presentes) |
+| Codigo | 8.5/10 | ↑1.5 (JSON fix + Enums) |
+| Seguranca | 6.5/10 | ↑0.5 (JSON fix) |
 | Testes | 6/10 | - |
 | Documentacao | 9/10 | - |
 | Performance | 7/10 | - |
-| **Database** | **9/10** | **NOVO** (schema bem desenhado) |
+| **Database** | **9/10** | - |
 
 ---
 
@@ -738,7 +748,7 @@ Com as correcoes dos itens de alta prioridade, o projeto estara pronto para prod
 
 ### Imediato (Bloqueadores de Producao)
 
-1. ⚠️ **Corrigir `safe_json_parse()`** em `utils.py:62`
+1. ~~**Corrigir `safe_json_parse()`**~~ ✅ FEITO
 2. ⚠️ **Refatorar RBAC decorators** em `permissions.py` ou remover codigo morto
 3. ⚠️ **Adicionar rate limiting** com slowapi
 
@@ -747,15 +757,16 @@ Com as correcoes dos itens de alta prioridade, o projeto estara pronto para prod
 4. Completar testes de Storage (Categoria 6)
 5. Adicionar testes para novos endpoints `/products`
 6. Implementar endpoint DELETE `/products/{id}`
+7. Refatorar codigo existente para usar Enums (opcional)
 
 ### Medio Prazo
 
-7. Adicionar paginacao em `GET /products`
-8. Implementar busca/filtro de produtos
-9. Dashboard de metricas
+8. Adicionar paginacao em `GET /products`
+9. Implementar busca/filtro de produtos
+10. Dashboard de metricas
 
 ---
 
 *Revisao gerada por Claude Code (Opus 4.5)*
 *Primeira revisao: 2026-01-12*
-*Atualizacao: 2026-01-13 (v0.5.1)*
+*Atualizacao: 2026-01-13 (v0.5.1 + bugfixes)*

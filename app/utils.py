@@ -5,7 +5,6 @@ Funções auxiliares para manipulação de imagens e validações.
 
 import io
 import json
-import re
 from PIL import Image
 from typing import Optional
 
@@ -51,23 +50,67 @@ def safe_json_parse(text: str) -> Optional[dict]:
     """
     Parse seguro de JSON retornado pela IA.
     Tenta extrair JSON mesmo que venha com texto extra.
+
+    Suporta objetos aninhados usando algoritmo de contagem de chaves.
+
+    Args:
+        text: Texto que pode conter JSON
+
+    Returns:
+        dict parseado ou None se não encontrar JSON válido
     """
+    if not text:
+        return None
+
+    # Tenta parse direto primeiro
     try:
-        # Tenta parse direto
-        return json.loads(text)
+        return json.loads(text.strip())
     except json.JSONDecodeError:
         pass
-    
-    # Tenta extrair JSON de dentro do texto
-    json_pattern = r'\{[^{}]*\}'
-    matches = re.findall(json_pattern, text)
-    
-    for match in matches:
-        try:
-            return json.loads(match)
-        except json.JSONDecodeError:
+
+    # Encontra JSON em texto misto usando contagem de chaves
+    # Isso resolve o problema de objetos aninhados que regex não captura
+    start = text.find('{')
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escape_next = False
+
+    for i, char in enumerate(text[start:], start):
+        # Lida com escape de caracteres dentro de strings
+        if escape_next:
+            escape_next = False
             continue
-    
+
+        if char == '\\' and in_string:
+            escape_next = True
+            continue
+
+        # Alterna estado de string (ignora chaves dentro de strings)
+        if char == '"':
+            in_string = not in_string
+            continue
+
+        # Conta chaves apenas fora de strings
+        if not in_string:
+            if char == '{':
+                depth += 1
+            elif char == '}':
+                depth -= 1
+
+            # Encontrou o fechamento do objeto raiz
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i+1])
+                except json.JSONDecodeError:
+                    # Continua procurando outro JSON válido
+                    next_start = text.find('{', i + 1)
+                    if next_start != -1:
+                        return safe_json_parse(text[next_start:])
+                    return None
+
     return None
 
 

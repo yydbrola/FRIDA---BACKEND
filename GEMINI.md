@@ -1,10 +1,10 @@
 # Frida Orchestrator - Backend Context
 
 ## Project Status
-**Version:** 0.5.2
+**Version:** 0.5.3
 **Last Updated:** 2026-01-13
 **Testing Status:** 64% Complete (16/25 tests passing)
-**Development Progress:** 45% (Micro-PRD 02 Complete)
+**Development Progress:** 65% (Micro-PRD 03 Complete)
 **Code Review Score:** 8.6/10 (see CODE_REVIEW.md)
 **Production Ready:** Core features ✓ | Edge cases & Load testing pending
 
@@ -18,6 +18,8 @@
 4.  **Product Catalog & Workflow:** Manages product lifecycle (draft → pending → approved → rejected → published) with database persistence.
 5.  **Secure Authentication & RBAC:** Validates Supabase JWT tokens and enforces Role-Based Access Control (`admin` vs `user`) with database-backed user validation.
 6.  **Audit & Storage:** Persists processed images to Supabase Storage and tracks metadata in PostgreSQL.
+7.  **Image Pipeline (NEW v0.5.3):** Triple storage (original, segmented, processed) with quality validation scoring 0-100.
+8.  **Quality Validation (NEW v0.5.3):** HuskLayer service validates resolution, centering, and background purity with pass threshold ≥80.
 
 ## Tech Stack
 -   **Runtime:** Python 3.12+
@@ -41,13 +43,16 @@ componentes/
 │   ├── services/
 │   │   ├── __init__.py
 │   │   ├── classifier.py       # Gemini Vision + Structured Output
-│   │   ├── background_remover.py # rembg + Pillow composition
+│   │   ├── background_remover.py # rembg + Pillow composition (legacy)
 │   │   ├── tech_sheet.py       # Jinja2 logic
-│   │   └── storage.py          # Supabase storage & audit
+│   │   ├── storage.py          # Supabase storage & audit
+│   │   ├── image_composer.py   # Advanced composition with shadow (NEW v0.5.3)
+│   │   ├── husk_layer.py       # Quality validation 0-100 (NEW v0.5.3)
+│   │   └── image_pipeline.py   # Pipeline orchestration (NEW v0.5.3)
 │   ├── templates/
 │   │   └── tech_sheet_premium.html
 │   ├── main.py                 # FastAPI entry point (Fail-Fast Startup)
-│   ├── config.py               # Settings + Product Enums (NEW)
+│   ├── config.py               # Settings + Product Enums
 │   ├── database.py             # Supabase DB client (Users, Products, Images)
 │   └── utils.py                # Helpers (Deep Validation, safe_json_parse)
 ├── SQL para o SUPABASE/        # Database Migration Scripts
@@ -55,13 +60,17 @@ componentes/
 │   ├── 02_seed_admin_zero.sql
 │   ├── 03_seed_team_members.sql
 │   ├── 04_create_products.sql  # Workflow + RLS
-│   └── 05_create_images.sql    # Image tracking + FK
+│   ├── 05_create_images.sql    # Image tracking + FK
+│   └── 06_rls_dual_mode.sql    # RLS dual mode (NEW v0.5.3)
+├── scripts/                    # Utility scripts (NEW v0.5.3)
+│   └── test_pipeline.py        # Local pipeline testing
 ├── venv/                       # Virtual environment (ignored by git)
 ├── .env                        # Environment variables (API Keys)
 ├── .env.example                # Template for env variables
 ├── requirements.txt            # Python dependencies
 ├── GEMINI.md                   # Project context for AI
 ├── CLAUDE.md                   # Context for Claude Code
+├── ANTIGRAVITY.md              # Implementation history for PRD 03 (NEW)
 ├── CODE_REVIEW.md              # Comprehensive code review (score: 8.6/10)
 ├── FASE_DE_TESTES.md           # Testing protocols v0.5.0
 └── README.md                   # Project documentation
@@ -128,18 +137,23 @@ ProductStatus.values()                # ["draft", "pending", "approved", "reject
 
 ## Implementation Details
 
-### Image Processing Pipeline
+### Image Processing Pipeline (Updated v0.5.3)
 1.  **Deep Validation:** Checks Magic Numbers and Pillow Integrity.
 2.  **Classification:** Gemini 2.0 identifies category/style.
 3.  **Product Creation:** Saves draft to `products` table.
-4.  **Segmentation:** `rembg` removes background.
-5.  **Composition:** `Pillow` applies #FFFFFF background and 1080x1080px resize.
-6.  **Image Tracking:** Saves record to `images` table.
-7.  **Output:** Base64 PNG + metadata + product_id.
+4.  **Image Pipeline (NEW):**
+    - Upload original → 'raw' bucket → type='original'
+    - Segmentation via `rembg` → 'segmented' bucket → type='segmented'
+    - Composition via `ImageComposer` (1200x1200, shadow) → 'processed-images' bucket → type='processed'
+    - Quality validation via `HuskLayer` → quality_score (0-100)
+5.  **Output:** Base64/URL + metadata + product_id + quality_score.
 
 ### Service Pattern
 - **ClassifierService**: temperature 0.1, response_schema for reliability.
-- **BackgroundRemoverService**: U2NET model, async-friendly thread execution.
+- **BackgroundRemoverService**: U2NET model, async-friendly thread execution (legacy).
+- **ImageComposer (NEW v0.5.3)**: White background composition with shadow, 1200x1200px output.
+- **HuskLayer (NEW v0.5.3)**: Quality validation (resolution 30pts + centering 40pts + background 30pts).
+- **ImagePipelineSync (NEW v0.5.3)**: Orchestrates triple storage with quality validation.
 - **Auth Service**: Enforces database registration (HTTP 403 if user not in `users` table).
 - **Database Module**: Creates new client per call (no singleton/cache).
 
@@ -173,7 +187,8 @@ ProductStatus.values()                # ["draft", "pending", "approved", "reject
 ### Protected (requires JWT if AUTH_ENABLED=true)
 - `POST /classify` - Classify image only
 - `POST /remove-background` - Remove background only
-- `POST /process` - Full pipeline (classification + processing + database storage)
+- `POST /process` - Full pipeline (classification + processing + database storage + quality validation)
+  - **NEW v0.5.3:** Returns `images`, `quality_score`, `quality_passed` in response
 - `GET /products` - List user's products
 - `GET /products/{id}` - Get specific product
 - `GET /auth/test` - Test authentication
@@ -185,22 +200,31 @@ ProductStatus.values()                # ["draft", "pending", "approved", "reject
 
 ## Development Roadmap
 
-### Current Progress: 45%
+### Current Progress: 65%
 ```
-████████████████░░░░░░░░░░░░░░ 45%
+████████████████████████░░░░░░ 65%
 
 ✅ Micro-PRD 01: Auth & Users (100%)
 ✅ Micro-PRD 02: Product Persistence (100%)
-⏸️ Micro-PRD 03: Image Pipeline (0%) ← NEXT
-⏸️ Micro-PRD 04: Async Jobs (0%)
+✅ Micro-PRD 03: Image Pipeline (100%) ← COMPLETE!
+⏸️ Micro-PRD 04: Async Jobs (0%) ← NEXT
 ⏸️ Micro-PRD 05: Tech Sheet (0%)
 ⏸️ Micro-PRD 06: Workflow Approval (0%)
 ```
 
-### Next: Micro-PRD 03 (Image Pipeline)
-1. **Sharp.js / Advanced Composition:** Improved centering and soft shadows.
-2. **Husk Layer:** Quality scoring (resolution, centering, background purity).
-3. **Triple Storage:** Saving original, segmented, and processed versions.
+### Completed: Micro-PRD 03 (Image Pipeline)
+**Implemented by:** Antigravity (Google DeepMind)
+- **ImageComposer:** White background composition with shadow (1200x1200px, 85% coverage)
+- **HuskLayer:** Quality validation (resolution 30pts + centering 40pts + background 30pts = 0-100)
+- **ImagePipelineSync:** Triple storage (original → segmented → processed)
+- **Test Script:** `scripts/test_pipeline.py` for local testing
+- **Test Result:** 100/100 score on first test
+
+### Next: Micro-PRD 04 (Async Jobs)
+1. Move heavy processing (rembg) to background workers
+2. Implement job queue with status tracking
+3. Add webhook notifications for job completion
+4. Implement retry logic for failed jobs
 
 ## Common Tasks & Commands
 - **Run Server:** `uvicorn app.main:app --reload --port 8000`
@@ -229,8 +253,10 @@ ProductStatus.values()                # ["draft", "pending", "approved", "reject
 1. ~~**RBAC Decorators**~~ ✅ FIXED in v0.5.2: Refactored to Dependency Factory pattern. Use `Depends(require_admin)` or `Depends(require_role("admin"))`.
 2. **Rate Limiting Not Implemented** ⚠️: Only remaining security blocker. Vulnerable to API abuse. Recommended: `slowapi` library.
 3. **Image Segmentation with Models**: rembg includes people in lifestyle photos. Consider Gemini Vision for product detection.
+4. **Performance (noted in v0.5.3)**: rembg takes 2-5s per image. Micro-PRD 04 (Async Jobs) will address this.
 
 ## Related Documentation
 - `CLAUDE.md` - Detailed project context (1000+ lines)
 - `CODE_REVIEW.md` - Comprehensive code analysis (score: 8.6/10)
 - `FASE_DE_TESTES.md` - Testing protocols and progress
+- `ANTIGRAVITY.md` - Implementation history for Micro-PRD 03 (NEW)

@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Status
 
-**Version:** 0.5.2
+**Version:** 0.5.3
 **Last Updated:** 2026-01-13
 **Testing Status:** 64% Complete (16/25 tests passing)
 **Production Ready:** Core features ✓ | Edge cases & Load testing pending
-**Development Progress:** 45% (Micro-PRD 02 Complete)
+**Development Progress:** 65% (Micro-PRD 03 Complete)
 **Code Review Score:** 8.6/10 (see CODE_REVIEW.md)
 
 ## Project Overview
@@ -26,6 +26,9 @@ Frida Orchestrator is a FastAPI backend for fashion product image processing (ba
 - **NEW:** Product catalog with workflow management (draft→pending→approved→rejected→published)
 - **NEW:** Product and image tracking with full CRUD endpoints
 - **NEW:** CORS configuration for Next.js frontend integration
+- **NEW:** Image Pipeline with triple storage (original, segmented, processed)
+- **NEW:** Quality validation system (Husk Layer) with 0-100 scoring
+- **NEW:** Advanced image composition with shadow and centering
 
 ## Project Structure
 
@@ -39,9 +42,12 @@ componentes/
 │   ├── services/
 │   │   ├── __init__.py
 │   │   ├── classifier.py            # Gemini Vision + Structured Output
-│   │   ├── background_remover.py    # rembg + Pillow composition
+│   │   ├── background_remover.py    # rembg + Pillow composition (legacy)
 │   │   ├── tech_sheet.py            # Jinja2 template rendering
-│   │   └── storage.py               # Supabase storage + audit trail
+│   │   ├── storage.py               # Supabase storage + audit trail
+│   │   ├── image_composer.py        # Advanced composition with shadow (NEW)
+│   │   ├── husk_layer.py            # Quality validation 0-100 (NEW)
+│   │   └── image_pipeline.py        # Pipeline orchestration (NEW)
 │   ├── templates/
 │   │   └── tech_sheet_premium.html  # Premium tech sheet (Outfit font)
 │   ├── main.py                      # FastAPI app + routes
@@ -53,8 +59,11 @@ componentes/
 │   ├── 01_create_users_table.sql   # Users table + RLS policies
 │   ├── 02_seed_admin_zero.sql      # Initial admin user
 │   ├── 03_seed_team_members.sql    # Team members seed data
-│   ├── 04_create_products.sql      # Products table + workflow (NEW)
-│   └── 05_create_images.sql        # Images table + tracking (NEW)
+│   ├── 04_create_products.sql      # Products table + workflow
+│   ├── 05_create_images.sql        # Images table + tracking
+│   └── 06_rls_dual_mode.sql        # RLS policies dual mode (NEW)
+├── scripts/                         # Utility scripts (NEW)
+│   └── test_pipeline.py            # Local pipeline testing
 ├── venv/                            # Python 3.12 virtual environment
 ├── .env                             # Environment variables (secrets)
 ├── .env.example                     # Template for .env
@@ -111,21 +120,42 @@ All business logic lives in `app/services/`. The `main.py` handles HTTP routing 
 
 - **Permissions Module** (`auth/permissions.py`): RBAC (Role-Based Access Control) via FastAPI Dependency Factories. Provides `require_admin`, `require_user`, `require_any`, and `require_role(*roles)` as dependencies. Use with `Depends()` for route protection.
 
+- **ImageComposer** (`services/image_composer.py`): NEW in v0.5.3. Advanced image composition with:
+  - White background (#FFFFFF)
+  - Product centered at 85% coverage
+  - Soft drop shadow (opacity 40, blur 15)
+  - Output 1200x1200px minimum
+  - LANCZOS resampling for quality
+
+- **HuskLayer** (`services/husk_layer.py`): NEW in v0.5.3. Quality validation system scoring 0-100:
+  - Resolution check (30 pts): ≥1200px minimum dimension
+  - Centering check (40 pts): ±15% tolerance, 75-95% coverage
+  - Background purity (30 pts): RGB delta <5 from pure white
+  - Pass threshold: score ≥80
+
+- **ImagePipelineSync** (`services/image_pipeline.py`): NEW in v0.5.3. Orchestrates the complete pipeline:
+  - Stage 1: Upload original → bucket 'raw' → type='original'
+  - Stage 2: Segmentation (rembg) → bucket 'segmented' → type='segmented'
+  - Stage 3: Composition → bucket 'processed-images' → type='processed'
+  - Stage 4: Quality validation → quality_score in response
+
 ### Processing Pipeline
 
-**`/process` endpoint (main pipeline):**
+**`/process` endpoint (main pipeline) - Updated v0.5.3:**
 1. **Validation Layer 1:** Content-Type header check (fast, vulnerable to spoofing)
 2. **Validation Layer 2:** Magic numbers check (file signatures)
 3. **Validation Layer 3:** Pillow integrity check (detects corruption)
 4. **Classification:** Gemini 2.0 Flash Lite with Structured Output (guaranteed JSON)
-5. **Database Insert (NEW):** Save product to `products` table with classification result
-6. **Background Removal:** rembg U2NET model
-7. **Composition:** White background + resize to 1080x1080px
-8. **Tech Sheet (optional):** Gemini data extraction + Jinja2 HTML rendering
-9. **Storage (optional):** Upload to Supabase storage bucket
-10. **Database Insert (NEW):** Save image record to `images` table
-11. **Audit (optional):** Log to `historico_geracoes` table
-12. **Response:** Base64 encoded PNG + metadata + product_id
+5. **Database Insert:** Save product to `products` table with classification result
+6. **Image Pipeline (NEW v0.5.3):**
+   - Upload original to 'raw' bucket
+   - Segmentation via rembg U2NET model → save to 'segmented' bucket
+   - Composition via ImageComposer (1200x1200, centered, shadow) → save to 'processed-images' bucket
+   - Quality validation via HuskLayer (0-100 score)
+   - Save all 3 image records to `images` table
+7. **Tech Sheet (optional):** Gemini data extraction + Jinja2 HTML rendering
+8. **Audit (optional):** Log to `historico_geracoes` table
+9. **Response:** Base64/URL + metadata + product_id + quality_score
 
 ### Key Design Decisions
 
@@ -256,7 +286,7 @@ Centralized in `config.py` for type safety and consistency:
   - `file` (required): Product image
   - `gerar_ficha` (optional): boolean, default=false
   - `product_id` (optional): string for storage organization (legacy parameter, unused)
-- **Response:**
+- **Response (Updated v0.5.3):**
   ```json
   {
     "status": "sucesso",
@@ -264,26 +294,25 @@ Centralized in `config.py` for type safety and consistency:
     "categoria": "bolsa",
     "estilo": "foto",
     "confianca": 0.95,
-    "imagem_base64": "iVBORw0KGgo...",
+    "imagem_base64": "iVBORw0KGgo..." or "storage:https://...",
     "ficha_tecnica": {
-      "dados": {
-        "nome": "Bolsa Premium",
-        "categoria": "bolsa",
-        "descricao": "Descrição elegante...",
-        "materiais": ["Couro sintético premium"],
-        "cores": ["Preto"],
-        "dimensoes": {"altura": "30 cm", "largura": "40 cm", "profundidade": "15 cm"},
-        "detalhes": ["Design moderno"]
-      },
+      "dados": {...},
       "html": "<html>...</html>"
     },
+    "images": {
+      "original": {"id": "uuid", "bucket": "raw", "path": "...", "url": "..."},
+      "segmented": {"id": "uuid", "bucket": "segmented", "path": "...", "url": "..."},
+      "processed": {"id": "uuid", "bucket": "processed-images", "path": "...", "url": "...", "quality_score": 95}
+    },
+    "quality_score": 95,
+    "quality_passed": true,
     "mensagem": "Imagem processada com sucesso! user_id=xxx"
   }
   ```
-- **Database Actions (NEW):**
+- **Database Actions:**
   - Creates product record in `products` table with classification result
-  - Creates image record in `images` table linked to product
-  - Returns `product_id` for frontend reference
+  - Creates 3 image records in `images` table (original, segmented, processed)
+  - Returns `product_id` and `quality_score` for frontend reference
 - **Storage:** If Supabase configured, saves to `{user_id}/{product_id}/{timestamp}.png`
 - **Audit:** Logs to `historico_geracoes` with metadata (legacy)
 - **Status Codes:** 200 OK, 400 Bad Request, 422 Validation Error, 500 Server Error
@@ -696,8 +725,9 @@ Located in `SQL para o SUPABASE/`, execute in order:
 1. **`01_create_users_table.sql`**: Creates `users` table + indexes + RLS policies
 2. **`02_seed_admin_zero.sql`**: Inserts initial admin user (requires manual UUID from Supabase Auth)
 3. **`03_seed_team_members.sql`**: Seeds team members (optional)
-4. **`04_create_products.sql`**: Creates `products` table + workflow + RLS policies (NEW)
-5. **`05_create_images.sql`**: Creates `images` table + RLS policies (NEW)
+4. **`04_create_products.sql`**: Creates `products` table + workflow + RLS policies
+5. **`05_create_images.sql`**: Creates `images` table + RLS policies
+6. **`06_rls_dual_mode.sql`**: RLS policies for dual mode (dev + prod) (NEW v0.5.3)
 
 **Setup Process:**
 1. Run `01_create_users_table.sql` in Supabase SQL Editor
@@ -1018,59 +1048,47 @@ def moderate(user: AuthUser = Depends(require_role("admin", "moderator"))):
 - Database CRUD operations
 - service_role GRANT resolution
 
+#### ✅ Micro-PRD 03: Image Pipeline (100%)
+**Completed:** 2026-01-13
+**Implemented by:** Antigravity (Google DeepMind)
+- **ImageComposer Service:** White background composition with shadow (1200x1200px, 85% coverage)
+- **HuskLayer Service:** Quality validation (resolution + centering + background purity = 0-100 score)
+- **ImagePipelineSync Service:** Triple storage orchestration (original → segmented → processed)
+- **RLS Policies:** Dual mode support (dev + prod) with 8 policies
+- **Test Script:** Local pipeline testing (`scripts/test_pipeline.py`)
+- **Integration:** `/process` endpoint updated with `quality_score` and `images` in response
+
 ### Current Progress
 ```
-████████████████░░░░░░░░░░░░░░ 45%
+████████████████████████░░░░░░ 65%
 
 Micro-PRD 00: ⏭️ Skipped
 Micro-PRD 01: ✅ 100% (Auth & Users)
-Micro-PRD 02: ✅ 100% (Product Persistence)  ← COMPLETE!
-Micro-PRD 03: ⏸️   0% (Image Pipeline)        ← NEXT (TODAY)
-Micro-PRD 04: ⏸️   0% (Async Jobs)
+Micro-PRD 02: ✅ 100% (Product Persistence)
+Micro-PRD 03: ✅ 100% (Image Pipeline)       ← COMPLETE!
+Micro-PRD 04: ⏸️   0% (Async Jobs)           ← NEXT
 Micro-PRD 05: ⏸️   0% (Tech Sheet)
 Micro-PRD 06: ⏸️   0% (Workflow Approval)
 ```
 
-### Next Steps: Micro-PRD 03 (Image Pipeline)
-**Estimated Duration:** 4-5 hours
-**Target Completion:** 2026-01-13 EOD
+### Next Steps: Micro-PRD 04 (Async Jobs)
 
-**Tasks:**
-1. **Sharp.js Integration (2h)**
-   - Install Sharp for Python or use Node.js
-   - Create `app/services/sharp_service.py`
-   - Implement `composite_white_background()`:
-     - White background #FFFFFF
-     - Centered composition (80-90% frame)
-     - Soft drop shadow
-     - Resize ≥1200px
+**Scope:**
+1. Move heavy processing (rembg) to background workers
+2. Implement job queue with status tracking
+3. Add webhook notifications for job completion
+4. Implement retry logic for failed jobs
 
-2. **Husk Layer Validation (1.5h)**
-   - Create `app/services/husk_layer.py`
-   - Implement `calculate_quality_score()`:
-     - Verify resolution ≥1200px
-     - Check centering (delta < 10%)
-     - Verify background purity (RGB < 5)
-     - Return score 0-100
-   - Test threshold (score ≥80)
-
-3. **Multiple Image Storage (1h)**
-   - Modify `POST /process`
-   - Save 3 records in images table:
-     - `type='original'` → raw bucket
-     - `type='segmented'` → segmented bucket
-     - `type='processed'` → processed bucket
-   - Test FK integrity
-
-4. **Final Validation (30min)**
-   - Process 10 varied images
-   - Verify all three image types saved
-   - Confirm quality scores
+**Benefits:**
+- Non-blocking API responses
+- Better scalability for concurrent uploads
+- Timeout and retry handling
 
 ### Timeline (Revised)
 ```
+✅ Micro-PRD 01: 12/01 (COMPLETE)
 ✅ Micro-PRD 02: 13/01 (COMPLETE)
-⏳ Micro-PRD 03: 13/01 (TODAY - 4-5h)
+✅ Micro-PRD 03: 13/01 (COMPLETE)
 ⏳ Micro-PRD 04: 14-17/01 (4 days)
 ⏳ Micro-PRD 05: 20-24/01 (5 days)
 ⏳ Micro-PRD 06: 27-31/01 (5 days)
@@ -1082,14 +1100,15 @@ MVP COMPLETE: ~31/01/2026 (18 days remaining)
 
 ## Related Documentation
 
-- `CODE_REVIEW.md` - **NEW:** Comprehensive code review (score: 8.6/10)
+- `CODE_REVIEW.md` - Comprehensive code review (score: 8.6/10)
 - `FASE_DE_TESTES.md` - Complete testing protocols and progress
 - `GEMINI.md` - AI model context and prompts
+- `ANTIGRAVITY.md` - Implementation history for Micro-PRD 03
 - `README.md` - Project overview and setup
 - `.env.example` - Environment variable template
 
 ---
 
 **Last Updated:** 2026-01-13
-**Current Phase:** Micro-PRD 03 (Image Pipeline)
+**Current Phase:** Micro-PRD 04 (Async Jobs) - Next
 **For Questions:** Refer to test results in FASE_DE_TESTES.md or check git history for context

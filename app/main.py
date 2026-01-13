@@ -17,6 +17,7 @@ from app.services.classifier import ClassifierService
 from app.services.background_remover import BackgroundRemoverService
 from app.services.tech_sheet import TechSheetService
 from app.services.storage import StorageService
+from app.services.image_pipeline import image_pipeline_sync
 from app.auth import get_current_user, AuthUser
 from app.database import create_product, get_user_products, create_image, get_supabase_client
 
@@ -61,6 +62,10 @@ class ProcessResponse(BaseModel):
     imagem_base64: str
     ficha_tecnica: Optional[dict] = None
     mensagem: Optional[str] = None
+    # Novos campos para pipeline v0.5.2
+    images: Optional[dict] = None  # {original, segmented, processed}
+    quality_score: Optional[int] = None  # 0-100
+    quality_passed: Optional[bool] = None  # score >= 80
 
 
 class HealthResponse(BaseModel):
@@ -348,73 +353,86 @@ def processar_produto(
             print(f"[DATABASE] ❌ Erro ao salvar produto: {str(e)}")
             # Continue processamento mesmo se falhar
         
-        # 4. Processa a imagem (remove fundo + fundo branco)
-        if background_service:
-            print("[PROCESS] Processando imagem...")
-            imagem_final, imagem_bytes = background_service.processar(content)
-            print("[PROCESS] Imagem processada com sucesso")
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail="Serviço de processamento de imagem não disponível"
-            )
+        # ============================================================
+        # 4. Executar Pipeline Completo (v0.5.2)
+        # Pipeline: original → segmented → processed + quality validation
+        # ============================================================
+        pipeline_images = {}
+        quality_score = None
+        quality_passed = None
+        imagem_bytes = None
         
-        # 5. Gera ficha técnica (opcional)
+        if db_product_id:
+            print("[PIPELINE] Executando pipeline completo...")
+            try:
+                pipeline_result = image_pipeline_sync.process_image(
+                    image_bytes=content,
+                    product_id=db_product_id,
+                    user_id=user_id,
+                    filename=file.filename or "upload.png"
+                )
+                
+                if pipeline_result.success:
+                    pipeline_images = pipeline_result.images
+                    if pipeline_result.quality_report:
+                        quality_score = pipeline_result.quality_report.score
+                        quality_passed = pipeline_result.quality_report.passed
+                    print(f"[PIPELINE] ✓ Completo! Score: {quality_score}/100")
+                else:
+                    print(f"[PIPELINE] ⚠️ Falhou: {pipeline_result.error}")
+                    # Manter imagens parciais se houver
+                    pipeline_images = pipeline_result.images
+                    
+            except Exception as e:
+                print(f"[PIPELINE] ❌ Erro: {str(e)}")
+                # Continue sem imagens do pipeline
+        
+        # 5. Fallback: processar com background_service se pipeline falhou
+        if not pipeline_images.get("processed") and background_service:
+            print("[PROCESS] Fallback: usando background_service...")
+            imagem_final, imagem_bytes = background_service.processar(content)
+            print("[PROCESS] ✓ Imagem processada (fallback)")
+        elif pipeline_images.get("processed"):
+            # Usar URL da imagem processada do pipeline
+            imagem_bytes = None  # Imagem já está no storage
+        
+        # 6. Gera ficha técnica (opcional)
         ficha = None
         if gerar_ficha and tech_sheet_service:
             print("[PROCESS] Gerando ficha técnica...")
+            # Se tiver imagem do fallback, usar ela
+            if imagem_bytes:
+                from PIL import Image
+                from io import BytesIO
+                imagem_final = Image.open(BytesIO(imagem_bytes))
+            else:
+                # Carregar imagem original para ficha técnica
+                from PIL import Image
+                from io import BytesIO
+                imagem_final = Image.open(BytesIO(content))
+            
             ficha = tech_sheet_service.gerar_ficha_completa(
                 imagem_final, 
                 classificacao["item"]
             )
-            print("[PROCESS] Ficha técnica gerada")
+            print("[PROCESS] ✓ Ficha técnica gerada")
         
-        # 6. Converte imagem para base64
-        imagem_base64 = base64.b64encode(imagem_bytes).decode("utf-8")
-        
-        # 7. Registra no Supabase para auditoria (opcional, não bloqueante)
-        storage_url = None
-        storage_path = None
-        if storage_service:
-            try:
-                print(f"[PROCESS] Registrando no Supabase para user {user_id}...")
-                storage_result = storage_service.processar_e_registrar(
-                    image_bytes=imagem_bytes,
-                    user_id=user_id,
-                    categoria=classificacao["item"],
-                    estilo=classificacao["estilo"],
-                    confianca=classificacao["confianca"],
-                    ficha_tecnica=ficha,
-                    product_id=db_product_id if db_product_id else product_id,
-                    original_filename=file.filename
-                )
-                if storage_result["success"]:
-                    storage_url = storage_result["image_url"]
-                    storage_path = storage_result.get("storage_path")
-                    print(f"[PROCESS] ✓ Registrado: {storage_result['record_id']}")
-                    
-                    # ============================================================
-                    # NOVO: Registrar imagem no banco
-                    # ============================================================
-                    if db_product_id and storage_url:
-                        try:
-                            image_record = create_image(
-                                product_id=db_product_id,
-                                type='processed',
-                                bucket=settings.SUPABASE_BUCKET,
-                                path=storage_url,
-                                user_id=user_id
-                            )
-                            print(f"[DATABASE] ✓ Imagem registrada: {image_record['id']}")
-                        except Exception as e:
-                            print(f"[DATABASE] ❌ Erro ao registrar imagem: {str(e)}")
-                else:
-                    print(f"[PROCESS] ⚠ Falha no registro: {storage_result['error']}")
-            except Exception as e:
-                print(f"[PROCESS] ⚠ Erro no storage (não bloqueante): {e}")
+        # 7. Gerar base64 da imagem processada
+        if imagem_bytes:
+            # Fallback: temos bytes locais
+            imagem_base64 = base64.b64encode(imagem_bytes).decode("utf-8")
+        elif pipeline_images.get("processed", {}).get("url"):
+            # Pipeline: converter URL para base64 (ou indicar que está no storage)
+            imagem_base64 = f"storage:{pipeline_images['processed']['url']}"
+        else:
+            # Converter original como fallback final
+            imagem_base64 = base64.b64encode(content).decode("utf-8")
         
         # Log de auditoria final
-        print(f"[PROCESS] Processing completed for user {user_id}: {classificacao['item']} ({classificacao['confianca']:.2%})")
+        print(f"[PROCESS] ✓ Concluído para user {user_id}: {classificacao['item']} ({classificacao['confianca']:.2%})")
+        if quality_score is not None:
+            status_emoji = "✅" if quality_passed else "❌"
+            print(f"[PROCESS] → Quality: {quality_score}/100 {status_emoji}")
         
         return ProcessResponse(
             status="sucesso",
@@ -424,7 +442,10 @@ def processar_produto(
             confianca=classificacao["confianca"],
             imagem_base64=imagem_base64,
             ficha_tecnica=ficha,
-            mensagem=f"Imagem processada com sucesso! user_id={user_id}"
+            mensagem=f"Imagem processada com sucesso! user_id={user_id}",
+            images=pipeline_images if pipeline_images else None,
+            quality_score=quality_score,
+            quality_passed=quality_passed
         )
         
     except HTTPException:

@@ -23,6 +23,7 @@ from rembg import remove
 from app.services.image_composer import image_composer
 from app.services.husk_layer import husk_layer, QualityReport
 from app.database import get_supabase_client, create_image
+from app.config import settings
 
 
 # =============================================================================
@@ -136,6 +137,32 @@ class ImagePipelineSync:
 
         try:
             print(f"[PIPELINE] Iniciando processamento para produto {product_id}")
+
+            # =================================================================
+            # STAGE 0: Validação de Segurança (DoS Protection)
+            # =================================================================
+            print("[PIPELINE] Stage 0: Validando arquivo...")
+
+            # Validar tamanho do arquivo
+            file_size = len(image_bytes)
+            if file_size > settings.MAX_FILE_SIZE_BYTES:
+                size_mb = file_size / (1024 * 1024)
+                raise ValueError(
+                    f"Arquivo muito grande: {size_mb:.1f}MB. "
+                    f"Limite: {settings.MAX_FILE_SIZE_MB}MB"
+                )
+
+            # Validar dimensões da imagem (previne memory exhaustion)
+            with BytesIO(image_bytes) as img_buffer:
+                with Image.open(img_buffer) as img:
+                    width, height = img.size
+                    max_dim = max(width, height)
+                    if max_dim > settings.MAX_IMAGE_DIMENSION:
+                        raise ValueError(
+                            f"Imagem muito grande: {width}x{height}px. "
+                            f"Dimensão máxima: {settings.MAX_IMAGE_DIMENSION}px"
+                        )
+                    print(f"[PIPELINE] ✓ Validação OK: {file_size/1024:.1f}KB, {width}x{height}px")
 
             # =================================================================
             # STAGE 1: Upload Original

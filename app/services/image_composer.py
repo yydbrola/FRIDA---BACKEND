@@ -118,32 +118,36 @@ class ImageComposer:
         return canvas
     
     def compose_from_bytes(
-        self, 
-        image_bytes: bytes, 
+        self,
+        image_bytes: bytes,
         target_size: Optional[int] = None
     ) -> bytes:
         """
         Versão para API: recebe e retorna bytes.
-        
+
         Args:
             image_bytes: PNG com transparência (bytes)
             target_size: Tamanho do output
-            
+
         Returns:
             PNG final composto (bytes)
         """
-        # Carregar imagem
-        input_image = Image.open(BytesIO(image_bytes))
-        
-        # Compor
-        result = self.compose_white_background(input_image, target_size)
-        
-        # Converter para bytes
-        output = BytesIO()
-        result.save(output, format='PNG', optimize=True)
-        output.seek(0)
-        
-        return output.getvalue()
+        # Carregar imagem com context manager para evitar leak
+        with BytesIO(image_bytes) as input_buffer:
+            input_image = Image.open(input_buffer)
+
+            try:
+                # Compor
+                result = self.compose_white_background(input_image, target_size)
+
+                # Converter para bytes
+                with BytesIO() as output:
+                    result.save(output, format='PNG', optimize=True)
+                    return output.getvalue()
+            finally:
+                # Fechar imagens PIL explicitamente
+                input_image.close()
+                result.close()
     
     # ==========================================================================
     # Métodos Privados

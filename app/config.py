@@ -104,6 +104,11 @@ class Settings:
     # Image Processing
     OUTPUT_SIZE: tuple[int, int] = (1080, 1080)
     BACKGROUND_COLOR: str = "#FFFFFF"
+
+    # DoS Protection - Limites de arquivo
+    MAX_FILE_SIZE_MB: int = 10  # Tamanho máximo do arquivo em MB
+    MAX_FILE_SIZE_BYTES: int = MAX_FILE_SIZE_MB * 1024 * 1024  # 10MB em bytes
+    MAX_IMAGE_DIMENSION: int = 8000  # Dimensão máxima (largura ou altura) em pixels
     
     @classmethod
     def validate(cls) -> list[str]:

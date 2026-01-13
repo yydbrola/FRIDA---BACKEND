@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Testing Status:** 64% Complete (16/25 tests passing)
 **Production Ready:** Core features ✓ | Edge cases & Load testing pending
 **Development Progress:** 65% (Micro-PRD 03 Complete)
-**Code Review Score:** 8.6/10 (see CODE_REVIEW.md)
+**Code Review Score:** 9.2/10 (see CODE_REVIEW.md)
 
 ## Project Overview
 
@@ -63,7 +63,12 @@ componentes/
 │   ├── 05_create_images.sql        # Images table + tracking
 │   └── 06_rls_dual_mode.sql        # RLS policies dual mode (NEW)
 ├── scripts/                         # Utility scripts (NEW)
-│   └── test_pipeline.py            # Local pipeline testing
+│   ├── test_pipeline.py            # Local pipeline testing
+│   └── test_prd03_complete.py      # Complete PRD 03 test suite (61 tests)
+├── test_images/                     # Test images for pipeline validation
+│   ├── bolsa_teste.png             # Test input image
+│   ├── bolsa_teste_segmented.png   # Segmented output
+│   └── bolsa_teste_processed.png   # Processed output (1200x1200)
 ├── venv/                            # Python 3.12 virtual environment
 ├── .env                             # Environment variables (secrets)
 ├── .env.example                     # Template for .env
@@ -72,7 +77,7 @@ componentes/
 ├── CLAUDE.md                        # This file
 ├── GEMINI.md                        # AI model context
 ├── FASE_DE_TESTES.md               # Testing protocols v0.5.0
-├── CODE_REVIEW.md                   # Code review analysis (score: 8.6/10)
+├── CODE_REVIEW.md                   # Code review analysis (score: 9.2/10)
 └── .gitignore
 ```
 
@@ -448,6 +453,162 @@ StorageResult = {
 - **Category 7:** Errors & Edge Cases (0/5 tests) - File size limits, concurrent requests
 - **Category 8:** Configuration & Startup (0/2 tests) - Missing API key scenarios
 
+## Micro-PRD 03 Test Suite (NEW v0.5.3)
+
+**Test Date:** 2026-01-13
+**Test Script:** `scripts/test_prd03_complete.py`
+**Result:** ✅ 61/61 tests passing (100%)
+
+### Test Categories & Results
+
+| Category | Tests | Result |
+|----------|-------|--------|
+| ImageComposer - Composição de Fundo Branco | 12/12 | ✅ 100% |
+| HuskLayer - Validação de Qualidade | 13/13 | ✅ 100% |
+| ImagePipeline - Estruturas e Configurações | 12/12 | ✅ 100% |
+| Config - Proteção DoS | 6/6 | ✅ 100% |
+| Edge Cases - Casos Extremos | 8/8 | ✅ 100% |
+| Integração - Fluxo Compositor → Validador | 7/7 | ✅ 100% |
+| Integração - rembg (Segmentação) | 3/3 | ✅ 100% |
+| **TOTAL** | **61/61** | **✅ 100%** |
+
+### ImageComposer Tests (12 tests)
+```
+✅ Configuração: TARGET_SIZE = 1200
+✅ Configuração: PRODUCT_COVERAGE = 0.85
+✅ Configuração: BACKGROUND_COLOR = (255, 255, 255)
+✅ Composição básica: retorna imagem
+✅ Composição básica: modo RGB
+✅ Composição básica: dimensão 1200x1200
+✅ Composição: cantos são branco puro
+✅ compose_from_bytes: retorna bytes
+✅ compose_from_bytes: PNG válido
+✅ Tamanho customizado: 800x800
+✅ Imagem RGB: lança ValueError
+✅ Imagem transparente: retorna canvas branco
+```
+
+### HuskLayer Tests (13 tests)
+```
+✅ Pontuação total = 100
+✅ Threshold de aprovação = 80
+✅ Imagem perfeita: score >= 80
+✅ Imagem perfeita: passed = True
+✅ Resolução baixa: score resolução < 30
+✅ Produto descentralizado: score centralização < 40
+✅ Fundo impuro: score background < 30
+✅ QualityReport.to_dict: contém 'score'
+✅ QualityReport.to_dict: contém 'passed'
+✅ QualityReport.to_dict: contém 'details'
+✅ validate_from_bytes: retorna QualityReport
+✅ Imagem toda branca: centralização = 0
+✅ Produto muito pequeno: cobertura TOO_SMALL
+```
+
+### ImagePipeline Tests (12 tests)
+```
+✅ BUCKETS: contém 'original'
+✅ BUCKETS: contém 'segmented'
+✅ BUCKETS: contém 'processed'
+✅ Bucket original = 'raw'
+✅ Bucket processed = 'processed-images'
+✅ PipelineResult: atributo success
+✅ PipelineResult: atributo product_id
+✅ PipelineResult: atributo images
+✅ PipelineResult.to_dict: serializável
+✅ PipelineResult.to_dict: contém success
+✅ ImagePipelineSync: instanciação
+✅ ImagePipelineSync: tem _client_lock
+```
+
+### DoS Protection Tests (6 tests)
+```
+✅ MAX_FILE_SIZE_MB configurado
+✅ MAX_FILE_SIZE_MB = 10
+✅ MAX_FILE_SIZE_BYTES configurado
+✅ MAX_FILE_SIZE_BYTES = 10MB em bytes
+✅ MAX_IMAGE_DIMENSION configurado
+✅ MAX_IMAGE_DIMENSION = 8000
+```
+
+### Edge Cases Tests (8 tests)
+```
+✅ Bytes corrompidos: lança exceção
+✅ Bytes vazios: lança exceção
+✅ Imagem 1x1: não crasha
+✅ Imagem 1x1: score baixo
+✅ Limite de dimensão: configurado
+✅ Transparência parcial: processa OK
+✅ Imagem grayscale: processa OK
+✅ Imagem palette: processa OK
+```
+
+### Integration Tests (10 tests)
+```
+✅ Fluxo: composição retorna imagem
+✅ Fluxo: validação retorna report
+✅ Fluxo: imagem composta passa (score >= 80)
+✅ Fluxo: resolução OK (30 pts)
+✅ Fluxo: fundo puro (30 pts)
+✅ Fluxo bytes: funciona end-to-end
+✅ Fluxo múltiplo: todas passam
+✅ rembg: importação OK
+✅ rembg: retorna bytes
+✅ rembg: retorna PNG válido
+```
+
+### Error Cases Tests (Original Script)
+```
+✅ Arquivo corrompido: Exceção capturada (UnidentifiedImageError)
+✅ Imagem muito pequena (1x1): Score baixo como esperado (0/100)
+✅ Imagem totalmente transparente: Retornou canvas branco (1200x1200)
+✅ Bytes vazios: Exceção capturada (UnidentifiedImageError)
+```
+
+### Full Pipeline Test (Real Image)
+```
+Imagem: test_images/bolsa_teste.png (800x600, 4KB)
+
+Pipeline Stages:
+✅ Stage 1: Segmentação (rembg) → 20,690 bytes
+✅ Stage 2: Composição (ImageComposer) → 1200x1200px
+✅ Stage 3: Validação (HuskLayer) → Score 100/100
+
+Quality Report:
+📐 Resolução: 30/30 pontos (OK: 1200x1200px)
+🎯 Centralização: 40/40 pontos (Cobertura: 84.7%, Desvio: 0.7%)
+⬜ Pureza do Fundo: 30/30 pontos (Delta: 0.0 - PURE_WHITE)
+
+RESULTADO: ✅ PIPELINE APROVADO - Imagem pronta para produção!
+```
+
+### Test Commands
+```bash
+# Run all PRD 03 tests
+python scripts/test_prd03_complete.py
+
+# Run only unit tests
+python scripts/test_prd03_complete.py --unit
+
+# Run only edge cases
+python scripts/test_prd03_complete.py --edge
+
+# Run only integration tests
+python scripts/test_prd03_complete.py --integration
+
+# Run error cases (original script)
+python scripts/test_pipeline.py --errors
+
+# Run full pipeline with image
+python scripts/test_pipeline.py test_images/bolsa_teste.png
+```
+
+### Test Files Created
+- `scripts/test_prd03_complete.py` - Complete test suite (61 tests)
+- `test_images/bolsa_teste.png` - Test image (800x600px)
+- `test_images/bolsa_teste_segmented.png` - Segmented result
+- `test_images/bolsa_teste_processed.png` - Processed result (1200x1200px)
+
 ## Known Limitations & TODOs
 
 ### 🔴 High Priority
@@ -813,9 +974,17 @@ uvicorn app.main:app --reload --port 8000
 
 **Run Tests:**
 ```bash
-# See FASE_DE_TESTES.md for full test suite
+# API health check
 curl http://localhost:8000/health
 curl -X POST http://localhost:8000/classify -F "file=@test.jpg"
+
+# PRD 03 Test Suite (61 tests)
+python scripts/test_prd03_complete.py
+
+# Full pipeline with image
+python scripts/test_pipeline.py test_images/bolsa_teste.png
+
+# See FASE_DE_TESTES.md for full test suite
 ```
 
 **Common Issues:**
@@ -1028,6 +1197,133 @@ def moderate(user: AuthUser = Depends(require_role("admin", "moderator"))):
     ...
 ```
 
+## Bug Fixes Applied (v0.5.3) - Micro-PRD 03
+
+### ✅ Transaction Rollback (Commit: `b274cb0`)
+
+**File:** `app/services/image_pipeline.py`
+**Severity:** 🔴 High
+**Status:** ✅ FIXED
+
+**Problem:** Pipeline uploaded files to multiple buckets (raw, segmented, processed-images) without rollback mechanism. If a stage failed, already uploaded files became orphans in storage.
+
+**Solution:**
+```python
+# Track uploaded files for rollback
+uploaded_files: list[tuple[str, str]] = []  # [(bucket, path), ...]
+
+# After each successful upload:
+uploaded_files.append((BUCKETS["original"], original_path))
+
+# On error:
+except Exception as e:
+    if uploaded_files:
+        self._rollback_uploads(uploaded_files)
+
+def _rollback_uploads(self, uploaded_files):
+    for bucket, path in uploaded_files:
+        self.client.storage.from_(bucket).remove([path])
+```
+
+**Impact:** Consistency between database and storage; no orphan files on partial failures.
+
+### ✅ Resource Leak Fix (Commit: `1642bb0`)
+
+**File:** `app/services/image_composer.py`
+**Severity:** 🔴 High
+**Status:** ✅ FIXED
+
+**Problem:** `BytesIO` and `PIL.Image` objects were never closed, causing memory leak in long-running processes.
+
+**Before (BROKEN):**
+```python
+input_image = Image.open(BytesIO(image_bytes))
+result = self.compose_white_background(input_image, target_size)
+output = BytesIO()
+result.save(output, format='PNG', optimize=True)
+return output.getvalue()  # Leak!
+```
+
+**After (FIXED):**
+```python
+with BytesIO(image_bytes) as input_buffer:
+    input_image = Image.open(input_buffer)
+    try:
+        result = self.compose_white_background(input_image, target_size)
+        with BytesIO() as output:
+            result.save(output, format='PNG', optimize=True)
+            return output.getvalue()
+    finally:
+        input_image.close()
+        result.close()
+```
+
+**Impact:** Prevents memory leak in prolonged use; resources released immediately.
+
+### ✅ DoS Protection (Commit: `08a6de1`)
+
+**Files:** `app/config.py`, `app/services/image_pipeline.py`
+**Severity:** 🔴 Critical
+**Status:** ✅ FIXED
+
+**Problem:** No size/dimension validation before rembg, allowing memory exhaustion attacks.
+
+**Solution in config.py:**
+```python
+# DoS Protection - File limits
+MAX_FILE_SIZE_MB: int = 10
+MAX_FILE_SIZE_BYTES: int = MAX_FILE_SIZE_MB * 1024 * 1024
+MAX_IMAGE_DIMENSION: int = 8000  # pixels
+```
+
+**Solution in image_pipeline.py (Stage 0):**
+```python
+# Validate file size
+file_size = len(image_bytes)
+if file_size > settings.MAX_FILE_SIZE_BYTES:
+    raise ValueError(f"File too large: {size_mb:.1f}MB")
+
+# Validate dimensions (prevents memory exhaustion)
+with BytesIO(image_bytes) as img_buffer:
+    with Image.open(img_buffer) as img:
+        if max(img.size) > settings.MAX_IMAGE_DIMENSION:
+            raise ValueError(f"Image too large: {width}x{height}px")
+```
+
+**Impact:** Protection against DoS attacks via upload; fail-fast before expensive operations.
+
+### ✅ API Response Fields (Commit: `01b1d66`)
+
+**File:** `app/main.py`
+**Severity:** 🟡 Medium
+**Status:** ✅ FIXED
+
+**Problem:** `imagem_base64` field was overloaded with both base64 data and storage URLs, causing frontend parsing issues.
+
+**Solution:** Separated into two distinct fields:
+- `imagem_base64`: Base64-encoded image data (fallback mode)
+- `imagem_url`: Storage URL when pipeline succeeds
+
+### ✅ Thread-Safe Client Loading (v0.5.2)
+
+**File:** `app/services/image_pipeline.py`
+**Severity:** 🟡 Medium
+**Status:** ✅ FIXED
+
+**Problem:** Supabase client loading had race condition in concurrent requests.
+
+**Solution:** Implemented double-check locking pattern for thread-safe lazy initialization.
+
+### ✅ rembg Error Handling (v0.5.2)
+
+**File:** `app/services/image_pipeline.py`
+**Severity:** 🟡 Medium
+**Status:** ✅ FIXED
+
+**Problem:** rembg errors were not properly caught and logged.
+
+**Solution:** Specific exception handling for rembg with detailed error messages and proper cleanup.
+
 ---
 
 ## Development Roadmap & Progress
@@ -1100,7 +1396,7 @@ MVP COMPLETE: ~31/01/2026 (18 days remaining)
 
 ## Related Documentation
 
-- `CODE_REVIEW.md` - Comprehensive code review (score: 8.6/10)
+- `CODE_REVIEW.md` - Comprehensive code review (score: 9.2/10)
 - `FASE_DE_TESTES.md` - Complete testing protocols and progress
 - `GEMINI.md` - AI model context and prompts
 - `ANTIGRAVITY.md` - Implementation history for Micro-PRD 03

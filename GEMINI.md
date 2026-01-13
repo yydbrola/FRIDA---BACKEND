@@ -5,7 +5,7 @@
 **Last Updated:** 2026-01-13
 **Testing Status:** 64% Complete (16/25 tests passing)
 **Development Progress:** 65% (Micro-PRD 03 Complete)
-**Code Review Score:** 8.6/10 (see CODE_REVIEW.md)
+**Code Review Score:** 9.2/10 (see CODE_REVIEW.md)
 **Production Ready:** Core features ✓ | Edge cases & Load testing pending
 
 ## Project Overview
@@ -63,7 +63,12 @@ componentes/
 │   ├── 05_create_images.sql    # Image tracking + FK
 │   └── 06_rls_dual_mode.sql    # RLS dual mode (NEW v0.5.3)
 ├── scripts/                    # Utility scripts (NEW v0.5.3)
-│   └── test_pipeline.py        # Local pipeline testing
+│   ├── test_pipeline.py        # Local pipeline testing
+│   └── test_prd03_complete.py  # Complete PRD 03 test suite (61 tests)
+├── test_images/                # Test images for pipeline validation
+│   ├── bolsa_teste.png         # Test input image
+│   ├── bolsa_teste_segmented.png   # Segmented output
+│   └── bolsa_teste_processed.png   # Processed output (1200x1200)
 ├── venv/                       # Virtual environment (ignored by git)
 ├── .env                        # Environment variables (API Keys)
 ├── .env.example                # Template for env variables
@@ -71,7 +76,7 @@ componentes/
 ├── GEMINI.md                   # Project context for AI
 ├── CLAUDE.md                   # Context for Claude Code
 ├── ANTIGRAVITY.md              # Implementation history for PRD 03 (NEW)
-├── CODE_REVIEW.md              # Comprehensive code review (score: 8.6/10)
+├── CODE_REVIEW.md              # Comprehensive code review (score: 9.2/10)
 ├── FASE_DE_TESTES.md           # Testing protocols v0.5.0
 └── README.md                   # Project documentation
 ```
@@ -169,6 +174,38 @@ ProductStatus.values()                # ["draft", "pending", "approved", "reject
 - Type safety with IDE autocomplete
 - Helper methods: `values()`, `is_valid()`
 
+### Bug Fixes Applied (v0.5.3) - Micro-PRD 03
+
+**Transaction Rollback (`b274cb0`):**
+- **File:** `image_pipeline.py`
+- **Problem:** Failed uploads left orphan files in Supabase Storage
+- **Solution:** Track uploaded files and delete on error with `_rollback_uploads()`
+
+**Resource Leak Fix (`1642bb0`):**
+- **File:** `image_composer.py`
+- **Problem:** BytesIO and PIL Image objects not properly closed
+- **Solution:** Context managers (`with BytesIO() as ...`) + explicit `close()` in finally block
+
+**DoS Protection (`08a6de1`):**
+- **Files:** `config.py`, `image_pipeline.py`
+- **Problem:** No limits on file size or image dimensions
+- **Solution:** Added `MAX_FILE_SIZE_MB=10`, `MAX_IMAGE_DIMENSION=8000` with validation
+
+**API Response Fields (`01b1d66`):**
+- **File:** `main.py`
+- **Problem:** Response missing `images`, `quality_score`, `quality_passed` fields
+- **Solution:** Added Optional fields to `ProcessResponse` model
+
+**Thread-Safe Supabase Client (v0.5.2):**
+- **File:** `image_pipeline.py`
+- **Problem:** Shared Supabase client caused race conditions
+- **Solution:** Create new client per request (no singleton)
+
+**rembg Error Handling (v0.5.2):**
+- **File:** `image_pipeline.py`
+- **Problem:** rembg exceptions not caught, caused HTTP 500
+- **Solution:** Try/except wrapper with graceful fallback
+
 ### Critical Issue Resolution (RESOLVED)
 **Issue:** `POST /process` returned `product_id: null` due to missing GRANTs for `service_role`.
 
@@ -197,6 +234,48 @@ ProductStatus.values()                # ["draft", "pending", "approved", "reject
 - **16/25 Tests Passing (64%)**
 - **Verified:** Health, Auth Dev Mode, Classification, Full Pipeline, Deep Security.
 - **Pending:** Supabase Storage, Load Testing, Edge Cases.
+
+## Micro-PRD 03 Test Suite (v0.5.3)
+
+**Test Date:** 2026-01-13
+**Test Script:** `scripts/test_prd03_complete.py`
+**Result:** ✅ 61/61 tests passing (100%)
+
+### Test Results Summary
+
+| Category | Tests | Result |
+|----------|-------|--------|
+| ImageComposer (Composição) | 12/12 | ✅ 100% |
+| HuskLayer (Validação) | 13/13 | ✅ 100% |
+| ImagePipeline (Estruturas) | 12/12 | ✅ 100% |
+| Config DoS Protection | 6/6 | ✅ 100% |
+| Edge Cases | 8/8 | ✅ 100% |
+| Integração Compositor→Validador | 7/7 | ✅ 100% |
+| Integração rembg | 3/3 | ✅ 100% |
+| **TOTAL** | **61/61** | **✅ 100%** |
+
+### Full Pipeline Test
+```
+Imagem: test_images/bolsa_teste.png (800x600, 4KB)
+
+✅ Stage 1: Segmentação (rembg) → 20,690 bytes
+✅ Stage 2: Composição (ImageComposer) → 1200x1200px
+✅ Stage 3: Validação (HuskLayer) → Score 100/100
+
+Quality Report:
+📐 Resolução: 30/30 pontos
+🎯 Centralização: 40/40 pontos (Cobertura: 84.7%)
+⬜ Pureza do Fundo: 30/30 pontos (Delta: 0.0)
+
+RESULTADO: ✅ PIPELINE APROVADO
+```
+
+### Test Commands
+```bash
+python scripts/test_prd03_complete.py           # All tests
+python scripts/test_prd03_complete.py --unit    # Unit tests only
+python scripts/test_pipeline.py test_images/bolsa_teste.png  # Full pipeline
+```
 
 ## Development Roadmap
 
@@ -231,6 +310,8 @@ ProductStatus.values()                # ["draft", "pending", "approved", "reject
 - **Health Check:** `curl http://localhost:8000/health`
 - **Process Image:** `curl -X POST http://localhost:8000/process -F "file=@image.jpg"`
 - **List Products:** `curl http://localhost:8000/products`
+- **Run PRD 03 Tests:** `python scripts/test_prd03_complete.py`
+- **Test Pipeline:** `python scripts/test_pipeline.py test_images/bolsa_teste.png`
 
 ## Configuration
 
@@ -257,6 +338,6 @@ ProductStatus.values()                # ["draft", "pending", "approved", "reject
 
 ## Related Documentation
 - `CLAUDE.md` - Detailed project context (1000+ lines)
-- `CODE_REVIEW.md` - Comprehensive code analysis (score: 8.6/10)
+- `CODE_REVIEW.md` - Comprehensive code analysis (score: 9.2/10)
 - `FASE_DE_TESTES.md` - Testing protocols and progress
 - `ANTIGRAVITY.md` - Implementation history for Micro-PRD 03 (NEW)

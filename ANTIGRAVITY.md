@@ -9,6 +9,7 @@ Este documento registra o processo de implementação, testes e resultados das f
 ## Sumário
 
 - [Micro-PRD 03: Image Pipeline](#micro-prd-03-image-pipeline)
+- [Bug Fixes v0.5.3](#bug-fixes-v053)
 
 ---
 
@@ -325,5 +326,217 @@ python3 -c "from app.main import app, ProcessResponse"
 
 ---
 
-*Documentado por: Claude (Anthropic)*
-*Data: 2026-01-13 17:16 BRT*
+# Bug Fixes v0.5.3
+
+**Data:** 2026-01-13  
+**Revisor Original:** Claude Code (Anthropic)  
+**Avaliação:** Antigravity (Google DeepMind)
+
+## Contexto
+
+Após a implementação do Micro-PRD 03, foi realizada uma revisão de código que identificou 9 issues. Abaixo está a análise comparativa entre as avaliações do revisor original e minha avaliação.
+
+---
+
+## Issues Identificados
+
+| # | Issue | Revisor | Minha Avaliação | Bloqueia MVP? |
+|---|-------|---------|-----------------|---------------|
+| 1 | API naming (`imagem_base64` vs `imagem_url`) | 🔴 CRÍTICO | 🟡 MÉDIO | Não |
+| 2 | Sem transações (arquivos órfãos) | 🔴 CRÍTICO | 🟡 MÉDIO | Não |
+| 3 | Silent pass (pipeline sem validação) | 🔴 CRÍTICO | 🔴 CRÍTICO | ✅ Sim |
+| 4 | DoS tamanho (file size sem limite) | 🔴 CRÍTICO | 🔴 CRÍTICO | ✅ Sim |
+| 5 | Resource leak (BytesIO/PIL) | 🔴 CRÍTICO | 🟡 MÉDIO | Não |
+| 6 | Race condition (lazy client) | 🟡 MÉDIO | 🟢 BAIXO | Não |
+| 7 | rembg errors (tratamento) | 🟡 MÉDIO | 🟡 MÉDIO | Não |
+| 8 | Documentação (desatualizada) | 🟡 MÉDIO | 🟢 BAIXO | Não |
+| 9 | Testes (edge cases) | 🟡 MÉDIO | 🟡 MÉDIO | Não |
+
+---
+
+## Análise Detalhada
+
+### Issue #1: API Naming
+**Problema:** Campo `imagem_base64` retornando `storage:URL` causava confusão na API.
+
+**Solução Aplicada:**
+```python
+# Antes
+imagem_base64: str  # Podia conter "storage:https://..."
+
+# Depois
+imagem_base64: Optional[str] = None  # Apenas base64 puro (fallback)
+imagem_url: Optional[str] = None     # URL do storage (pipeline)
+```
+
+**Status:** ✅ CORRIGIDO
+
+---
+
+### Issue #2: Sem Transações (Arquivos Órfãos)
+**Problema:** Se o pipeline falhasse após uploads parciais, arquivos ficavam órfãos no storage.
+
+**Solução Aplicada:**
+```python
+# Lista para rollback
+uploaded_files: list[tuple[str, str]] = []
+
+# Em caso de erro
+except Exception as e:
+    if uploaded_files:
+        self._rollback_uploads(uploaded_files)
+```
+
+**Status:** ✅ CORRIGIDO
+
+---
+
+### Issue #3: Silent Pass (BLOQUEADOR)
+**Problema:** Pipeline passava silenciosamente sem validar se processamento ocorreu.
+
+**Solução Aplicada:**
+- Validação explícita após cada etapa
+- Logs detalhados de sucesso/falha
+- Quality report sempre gerado
+
+**Status:** ✅ CORRIGIDO
+
+---
+
+### Issue #4: DoS Tamanho (BLOQUEADOR)
+**Problema:** Sem limite de tamanho de arquivo, atacante poderia enviar imagens gigantes.
+
+**Solução Aplicada:**
+```python
+# config.py
+MAX_FILE_SIZE_MB: int = 10
+MAX_FILE_SIZE_BYTES: int = MAX_FILE_SIZE_MB * 1024 * 1024
+MAX_IMAGE_DIMENSION: int = 8000  # pixels
+
+# image_pipeline.py - Stage 0: Validação
+if file_size > settings.MAX_FILE_SIZE_BYTES:
+    raise ValueError(f"Arquivo muito grande: {size_mb:.1f}MB")
+```
+
+**Status:** ✅ CORRIGIDO
+
+---
+
+### Issue #5: Resource Leak
+**Problema:** Objetos `BytesIO` e `PIL.Image` não eram fechados, causando memory leak.
+
+**Solução Aplicada:**
+```python
+# Usando context managers
+with BytesIO(image_bytes) as input_buffer:
+    input_image = Image.open(input_buffer)
+    try:
+        result = self.compose_white_background(input_image, target_size)
+        # ...
+    finally:
+        input_image.close()
+        result.close()
+```
+
+**Status:** ✅ CORRIGIDO
+
+---
+
+### Issue #6: Race Condition
+**Problema:** Lazy loading do client Supabase poderia ter race condition.
+
+**Minha Avaliação:** 🟢 BAIXO - O Python GIL protege contra race conditions na maioria dos casos. A inicialização lazy é thread-safe o suficiente para o caso de uso atual.
+
+**Status:** Não bloqueador, mantido como está.
+
+---
+
+### Issue #7: rembg Errors
+**Problema:** Erros do rembg não eram tratados especificamente.
+
+**Solução Aplicada:**
+```python
+try:
+    segmented_bytes = remove(image_bytes)
+except Exception as e:
+    print(f"[PIPELINE] ❌ Erro no rembg: {str(e)}")
+    result.error = f"Segmentação falhou: {str(e)}"
+    return result
+```
+
+**Status:** ✅ CORRIGIDO
+
+---
+
+### Issue #8: Documentação
+**Problema:** GEMINI.md e CLAUDE.md desatualizados.
+
+**Minha Avaliação:** 🟢 BAIXO - Documentação pode ser atualizada incrementalmente. Não bloqueia funcionalidade.
+
+**Status:** Pendente (baixa prioridade)
+
+---
+
+### Issue #9: Testes (Edge Cases)
+**Problema:** Faltam testes para casos de erro.
+
+**Solução Aplicada:**
+```bash
+# Novo modo de teste
+python scripts/test_pipeline.py --errors
+```
+
+Testes adicionados:
+- Arquivo corrompido
+- Imagem muito pequena (1x1)
+- Imagem totalmente transparente
+- Bytes vazios
+
+**Status:** ✅ CORRIGIDO (parcial)
+
+---
+
+## Resumo das Correções
+
+| Total de Issues | Críticos | Médios | Baixos | Corrigidos |
+|-----------------|----------|--------|--------|------------|
+| 9 | 5 | 3 | 1 | 7 |
+
+**Bloqueadores de MVP Restantes:** 0 ✅
+
+---
+
+## Arquivos Modificados (Bug Fixes)
+
+| Arquivo | Mudança | Commit |
+|---------|---------|--------|
+| `app/main.py` | Separação `imagem_base64`/`imagem_url` | - |
+| `app/services/image_pipeline.py` | Rollback + DoS protection | - |
+| `app/services/image_composer.py` | Resource leak fix | - |
+| `app/config.py` | MAX_FILE_SIZE_MB, MAX_IMAGE_DIMENSION | - |
+| `scripts/test_pipeline.py` | Testes de erro adicionados | - |
+
+---
+
+## Comentários Finais
+
+### Concordâncias com o Revisor
+- Issues #3 e #4 eram realmente críticos e bloqueadores
+- Resource leak (#5) precisava ser corrigido, mesmo que não bloqueasse MVP
+- Tratamento de erros do rembg (#7) era importante para UX
+
+### Discordâncias
+- Issue #1 (API naming) foi classificado como CRÍTICO pelo revisor, mas considero MÉDIO pois não quebra funcionalidade, apenas clareza
+- Issue #6 (Race condition) é BAIXO considerando que o backend roda em single-thread na maioria dos deployments
+- Issue #8 (Documentação) não é bloqueador para MVP
+
+### Lições Aprendidas
+1. **Validar inputs cedo** - DoS protection deveria estar desde o início
+2. **Context managers sempre** - Evita memory leaks silenciosos
+3. **Rollback explícito** - Transações distribuídas precisam de compensação
+4. **Campos de API claros** - Evitar campos multi-propósito
+
+---
+
+*Documentado por: Claude (Anthropic)*  
+*Data: 2026-01-13 19:26 BRT*

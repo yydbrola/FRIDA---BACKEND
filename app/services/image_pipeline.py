@@ -109,40 +109,48 @@ class ImagePipelineSync:
     ) -> PipelineResult:
         """
         Executa pipeline completo de processamento.
-        
+
         Args:
             image_bytes: Bytes da imagem original
             product_id: UUID do produto
             user_id: UUID do usuário
             filename: Nome original do arquivo
-            
+
         Returns:
             PipelineResult com status e informações das imagens
+
+        Note:
+            Implementa rollback automático em caso de falha.
+            Se qualquer etapa falhar, os arquivos já uploadados são removidos.
         """
         result = PipelineResult(
             success=False,
             product_id=product_id,
             images={}
         )
-        
+
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        
+
+        # Lista de arquivos uploadados para rollback em caso de erro
+        uploaded_files: list[tuple[str, str]] = []  # [(bucket, path), ...]
+
         try:
             print(f"[PIPELINE] Iniciando processamento para produto {product_id}")
-            
+
             # =================================================================
             # STAGE 1: Upload Original
             # =================================================================
             print("[PIPELINE] Stage 1: Salvando original...")
-            
+
             original_path = f"{product_id}/{timestamp}_original.png"
             original_url = self._upload_to_storage(
                 bucket=BUCKETS["original"],
                 path=original_path,
                 data=image_bytes
             )
-            
+
             if original_url:
+                uploaded_files.append((BUCKETS["original"], original_path))
                 original_record = self._create_image_record(
                     product_id=product_id,
                     image_type="original",
@@ -150,7 +158,7 @@ class ImagePipelineSync:
                     path=original_path,
                     user_id=user_id
                 )
-                
+
                 result.images["original"] = {
                     "id": original_record.get("id") if original_record else None,
                     "bucket": BUCKETS["original"],
@@ -158,7 +166,7 @@ class ImagePipelineSync:
                     "url": original_url
                 }
                 print(f"[PIPELINE] ✓ Original salvo: {original_path}")
-            
+
             # =================================================================
             # STAGE 2: Segmentação (rembg)
             # =================================================================
@@ -182,8 +190,9 @@ class ImagePipelineSync:
                 path=segmented_path,
                 data=segmented_bytes
             )
-            
+
             if segmented_url:
+                uploaded_files.append((BUCKETS["segmented"], segmented_path))
                 segmented_record = self._create_image_record(
                     product_id=product_id,
                     image_type="segmented",
@@ -191,7 +200,7 @@ class ImagePipelineSync:
                     path=segmented_path,
                     user_id=user_id
                 )
-                
+
                 result.images["segmented"] = {
                     "id": segmented_record.get("id") if segmented_record else None,
                     "bucket": BUCKETS["segmented"],
@@ -199,32 +208,35 @@ class ImagePipelineSync:
                     "url": segmented_url
                 }
                 print(f"[PIPELINE] ✓ Segmentado salvo: {segmented_path}")
-            
+
             # =================================================================
             # STAGE 3: Composição (fundo branco)
             # =================================================================
             print("[PIPELINE] Stage 3: Compondo fundo branco...")
-            
+
             # Compor com fundo branco usando image_composer
             processed_bytes = image_composer.compose_from_bytes(segmented_bytes)
-            
+
             processed_path = f"{product_id}/{timestamp}_processed.png"
             processed_url = self._upload_to_storage(
                 bucket=BUCKETS["processed"],
                 path=processed_path,
                 data=processed_bytes
             )
-            
+
+            if processed_url:
+                uploaded_files.append((BUCKETS["processed"], processed_path))
+
             # =================================================================
             # STAGE 4: Validação de Qualidade
             # =================================================================
             print("[PIPELINE] Stage 4: Validando qualidade...")
-            
+
             quality_report = husk_layer.validate_from_bytes(processed_bytes)
             result.quality_report = quality_report
-            
+
             quality_score = quality_report.score if quality_report else None
-            
+
             if processed_url:
                 processed_record = self._create_image_record(
                     product_id=product_id,
@@ -234,7 +246,7 @@ class ImagePipelineSync:
                     user_id=user_id,
                     quality_score=quality_score
                 )
-                
+
                 result.images["processed"] = {
                     "id": processed_record.get("id") if processed_record else None,
                     "bucket": BUCKETS["processed"],
@@ -249,18 +261,42 @@ class ImagePipelineSync:
             # =================================================================
             result.success = True
             print(f"[PIPELINE] ✓ Pipeline completo! Quality Score: {quality_score}/100")
-            
+
         except Exception as e:
             error_msg = str(e)
             result.error = error_msg
             print(f"[PIPELINE] ❌ Erro: {error_msg}")
-        
+
+            # Rollback: remover arquivos já uploadados para evitar órfãos
+            if uploaded_files:
+                print(f"[PIPELINE] 🔄 Iniciando rollback de {len(uploaded_files)} arquivo(s)...")
+                self._rollback_uploads(uploaded_files)
+
         return result
     
     # ==========================================================================
     # Métodos Auxiliares
     # ==========================================================================
-    
+
+    def _rollback_uploads(self, uploaded_files: list[tuple[str, str]]) -> None:
+        """
+        Remove arquivos já uploadados em caso de falha no pipeline.
+
+        Args:
+            uploaded_files: Lista de tuplas (bucket, path) dos arquivos a remover
+
+        Note:
+            Erros de remoção são logados mas não propagados,
+            pois o pipeline já está em estado de erro.
+        """
+        for bucket, path in uploaded_files:
+            try:
+                self.client.storage.from_(bucket).remove([path])
+                print(f"[PIPELINE] ✓ Rollback: removido {bucket}/{path}")
+            except Exception as e:
+                # Log mas não falha - já estamos em estado de erro
+                print(f"[PIPELINE] ⚠️ Rollback falhou para {bucket}/{path}: {e}")
+
     def _upload_to_storage(
         self,
         bucket: str,

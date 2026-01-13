@@ -59,10 +59,11 @@ class ProcessResponse(BaseModel):
     categoria: str
     estilo: str
     confianca: float
-    imagem_base64: str
+    imagem_base64: Optional[str] = None  # Base64 da imagem processada (fallback local)
+    imagem_url: Optional[str] = None  # URL da imagem no storage (pipeline completo)
     ficha_tecnica: Optional[dict] = None
     mensagem: Optional[str] = None
-    # Novos campos para pipeline v0.5.2
+    # Novos campos para pipeline v0.5.3
     images: Optional[dict] = None  # {original, segmented, processed}
     quality_score: Optional[int] = None  # 0-100
     quality_passed: Optional[bool] = None  # score >= 80
@@ -417,23 +418,27 @@ def processar_produto(
             )
             print("[PROCESS] ✓ Ficha técnica gerada")
         
-        # 7. Gerar base64 da imagem processada
+        # 7. Preparar resposta de imagem (separando base64 de URL)
+        # API v0.5.3: campos separados para evitar breaking change
+        imagem_base64 = None
+        imagem_url = None
+
         if imagem_bytes:
-            # Fallback: temos bytes locais
+            # Fallback: temos bytes locais, retornar como base64
             imagem_base64 = base64.b64encode(imagem_bytes).decode("utf-8")
         elif pipeline_images.get("processed", {}).get("url"):
-            # Pipeline: converter URL para base64 (ou indicar que está no storage)
-            imagem_base64 = f"storage:{pipeline_images['processed']['url']}"
+            # Pipeline: imagem está no storage, retornar URL
+            imagem_url = pipeline_images["processed"]["url"]
         else:
-            # Converter original como fallback final
+            # Fallback final: retornar original como base64
             imagem_base64 = base64.b64encode(content).decode("utf-8")
-        
+
         # Log de auditoria final
         print(f"[PROCESS] ✓ Concluído para user {user_id}: {classificacao['item']} ({classificacao['confianca']:.2%})")
         if quality_score is not None:
             status_emoji = "✅" if quality_passed else "❌"
             print(f"[PROCESS] → Quality: {quality_score}/100 {status_emoji}")
-        
+
         return ProcessResponse(
             status="sucesso",
             product_id=db_product_id,
@@ -441,6 +446,7 @@ def processar_produto(
             estilo=classificacao["estilo"],
             confianca=classificacao["confianca"],
             imagem_base64=imagem_base64,
+            imagem_url=imagem_url,
             ficha_tecnica=ficha,
             mensagem=f"Imagem processada com sucesso! user_id={user_id}",
             images=pipeline_images if pipeline_images else None,

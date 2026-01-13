@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Status
 
-**Version:** 0.5.1
+**Version:** 0.5.2
 **Last Updated:** 2026-01-13
 **Testing Status:** 64% Complete (16/25 tests passing)
 **Production Ready:** Core features ✓ | Edge cases & Load testing pending
 **Development Progress:** 45% (Micro-PRD 02 Complete)
-**Code Review Score:** 8.2/10 (see CODE_REVIEW.md)
+**Code Review Score:** 8.6/10 (see CODE_REVIEW.md)
 
 ## Project Overview
 
@@ -63,7 +63,7 @@ componentes/
 ├── CLAUDE.md                        # This file
 ├── GEMINI.md                        # AI model context
 ├── FASE_DE_TESTES.md               # Testing protocols v0.5.0
-├── CODE_REVIEW.md                   # Code review analysis (score: 8.2/10)
+├── CODE_REVIEW.md                   # Code review analysis (score: 8.6/10)
 └── .gitignore
 ```
 
@@ -953,21 +953,29 @@ ProductStatus.values()  # ["draft", "pending", "approved", "rejected", "publishe
 - Single source of truth for valid values
 - Helper methods: `values()`, `is_valid()`
 
-### ⚠️ Known Issue: RBAC Decorators (NOT FIXED)
+### ✅ RBAC Implementation (FIXED in v0.5.2)
 
-**File:** `permissions.py:39`
-**Severity:** 🟡 Medium
-**Status:** ❌ NOT FIXED (see CODE_REVIEW.md)
+**File:** `permissions.py`
+**Status:** ✅ FIXED - Refactored from decorators to Dependency Factory
 
-The `@require_admin` decorator pattern is incompatible with FastAPI's dependency injection when using `*args`. Routes currently rely on `Depends(get_current_user)` directly.
+The RBAC system now uses FastAPI's dependency injection pattern correctly:
 
-**Workaround:** Use dependency injection pattern instead of decorators:
 ```python
-# Instead of @require_admin decorator:
-from app.auth.permissions import require_role
+from app.auth.permissions import require_admin, require_user, require_any, require_role
 
+# Apenas admin
 @app.delete("/users/{id}")
-def delete_user(user: AuthUser = Depends(require_role("admin"))):
+def delete_user(user: AuthUser = Depends(require_admin)):
+    ...
+
+# Qualquer autenticado
+@app.get("/products")
+def list_products(user: AuthUser = Depends(require_any)):
+    ...
+
+# Roles customizados
+@app.post("/moderate")
+def moderate(user: AuthUser = Depends(require_role("admin", "moderator"))):
     ...
 ```
 
@@ -1055,7 +1063,7 @@ MVP COMPLETE: ~31/01/2026 (18 days remaining)
 
 ## Related Documentation
 
-- `CODE_REVIEW.md` - **NEW:** Comprehensive code review (score: 8.2/10)
+- `CODE_REVIEW.md` - **NEW:** Comprehensive code review (score: 8.6/10)
 - `FASE_DE_TESTES.md` - Complete testing protocols and progress
 - `GEMINI.md` - AI model context and prompts
 - `README.md` - Project overview and setup

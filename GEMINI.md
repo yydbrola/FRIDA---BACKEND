@@ -1,11 +1,11 @@
 # Frida Orchestrator - Backend Context
 
 ## Project Status
-**Version:** 0.5.1
+**Version:** 0.5.2
 **Last Updated:** 2026-01-13
 **Testing Status:** 64% Complete (16/25 tests passing)
 **Development Progress:** 45% (Micro-PRD 02 Complete)
-**Code Review Score:** 8.2/10 (see CODE_REVIEW.md)
+**Code Review Score:** 8.6/10 (see CODE_REVIEW.md)
 **Production Ready:** Core features ✓ | Edge cases & Load testing pending
 
 ## Project Overview
@@ -226,7 +226,7 @@ ProductStatus.values()                # ["draft", "pending", "approved", "reject
 
 ## Known Issues
 
-1. **RBAC Decorators** (`permissions.py:39`): Decorator pattern incompatible with FastAPI's `*args`. Use `Depends(require_role("admin"))` instead.
+1. ~~**RBAC Decorators**~~ ✅ FIXED in v0.5.2: Refactored to Dependency Factory pattern. Use `Depends(require_admin)` or `Depends(require_role("admin"))`.
 2. **Image Segmentation with Models**: rembg includes people in lifestyle photos. Consider Gemini Vision for product detection.
 
 ## Related Documentation

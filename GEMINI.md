@@ -5,6 +5,7 @@
 **Last Updated:** 2026-01-13
 **Testing Status:** 64% Complete (16/25 tests passing)
 **Development Progress:** 45% (Micro-PRD 02 Complete)
+**Code Review Score:** 8.2/10 (see CODE_REVIEW.md)
 **Production Ready:** Core features ✓ | Edge cases & Load testing pending
 
 ## Project Overview
@@ -46,9 +47,9 @@ componentes/
 │   ├── templates/
 │   │   └── tech_sheet_premium.html
 │   ├── main.py                 # FastAPI entry point (Fail-Fast Startup)
-│   ├── config.py               # Settings management
+│   ├── config.py               # Settings + Product Enums (NEW)
 │   ├── database.py             # Supabase DB client (Users, Products, Images)
-│   └── utils.py                # Helpers (Deep Validation, image manipulation)
+│   └── utils.py                # Helpers (Deep Validation, safe_json_parse)
 ├── SQL para o SUPABASE/        # Database Migration Scripts
 │   ├── 01_create_users_table.sql
 │   ├── 02_seed_admin_zero.sql
@@ -61,6 +62,7 @@ componentes/
 ├── requirements.txt            # Python dependencies
 ├── GEMINI.md                   # Project context for AI
 ├── CLAUDE.md                   # Context for Claude Code
+├── CODE_REVIEW.md              # Comprehensive code review (score: 8.2/10)
 ├── FASE_DE_TESTES.md           # Testing protocols v0.5.0
 └── README.md                   # Project documentation
 ```
@@ -73,20 +75,56 @@ componentes/
 -   `role` (TEXT): 'admin' | 'user'.
 -   `name` (TEXT)
 
-### Products Table (NEW)
+### Products Table
 -   `id` (UUID, PK)
 -   `name` (TEXT)
 -   `sku` (TEXT, Unique)
--   `category` (TEXT)
--   `status` (TEXT): draft, pending, approved, rejected, published.
+-   `category` (TEXT): bolsa | lancheira | garrafa_termica | desconhecido
+-   `classification_result` (JSONB): Gemini AI classification response
+-   `status` (TEXT): draft | pending | approved | rejected | published
 -   `created_by` (UUID, FK -> users)
 
-### Images Table (NEW)
+### Images Table
 -   `id` (UUID, PK)
--   `product_id` (UUID, FK -> products)
--   `type` (TEXT): original, segmented, processed.
+-   `product_id` (UUID, FK -> products, CASCADE DELETE)
+-   `type` (TEXT): original | segmented | processed
+-   `storage_bucket` (TEXT)
 -   `storage_path` (TEXT)
--   `quality_score` (INTEGER): 0-100.
+-   `quality_score` (INTEGER): 0-100
+
+## Product Enums (NEW in v0.5.1)
+
+Centralized in `config.py` for type safety:
+
+```python
+from app.config import ProductCategory, ProductStyle, ProductStatus, ImageType
+
+# Categories
+ProductCategory.BOLSA.value           # "bolsa"
+ProductCategory.LANCHEIRA.value       # "lancheira"
+ProductCategory.GARRAFA_TERMICA.value # "garrafa_termica"
+ProductCategory.DESCONHECIDO.value    # "desconhecido"
+
+# Styles
+ProductStyle.SKETCH.value             # "sketch"
+ProductStyle.FOTO.value               # "foto"
+
+# Workflow Status
+ProductStatus.DRAFT.value             # "draft"
+ProductStatus.PENDING.value           # "pending"
+ProductStatus.APPROVED.value          # "approved"
+ProductStatus.REJECTED.value          # "rejected"
+ProductStatus.PUBLISHED.value         # "published"
+
+# Image Types
+ImageType.ORIGINAL.value              # "original"
+ImageType.SEGMENTED.value             # "segmented"
+ImageType.PROCESSED.value             # "processed"
+
+# Helper methods
+ProductCategory.is_valid("bolsa")     # True
+ProductStatus.values()                # ["draft", "pending", "approved", "rejected", "published"]
+```
 
 ## Implementation Details
 
@@ -103,18 +141,63 @@ componentes/
 - **ClassifierService**: temperature 0.1, response_schema for reliability.
 - **BackgroundRemoverService**: U2NET model, async-friendly thread execution.
 - **Auth Service**: Enforces database registration (HTTP 403 if user not in `users` table).
-- **Permissions Module**: `@require_admin`, `@require_user` decorators.
+- **Database Module**: Creates new client per call (no singleton/cache).
+
+### Bug Fixes Applied (v0.5.1)
+
+**JSON Parsing Fix:**
+- Old: Regex `r'\{[^{}]*\}'` failed on nested objects
+- New: Bracket-counting algorithm handles nested JSON correctly
+- Impact: Tech sheet `dimensoes` field now parses properly
+
+**Product Enums Added:**
+- Eliminates magic strings throughout codebase
+- Type safety with IDE autocomplete
+- Helper methods: `values()`, `is_valid()`
 
 ### Critical Issue Resolution (RESOLVED)
 **Issue:** `POST /process` returned `product_id: null` due to missing GRANTs for `service_role`.
+
 **Fix:** Explicit `GRANT ALL` on `products`, `images`, and `users` tables to `service_role` in Supabase.
 
+**Key Lesson:** PostgreSQL `rolbypassrls=true` does NOT bypass GRANT permissions. Tables need explicit GRANTs even for service_role.
+
+## API Endpoints
+
+### Public
+- `GET /` - Homepage
+- `GET /health` - Service health check
+- `GET /public/ping` - Connectivity test
+- `GET /docs` - Swagger UI
+
+### Protected (requires JWT if AUTH_ENABLED=true)
+- `POST /classify` - Classify image only
+- `POST /remove-background` - Remove background only
+- `POST /process` - Full pipeline (classification + processing + database storage)
+- `GET /products` - List user's products
+- `GET /products/{id}` - Get specific product
+- `GET /auth/test` - Test authentication
+
 ## Testing Protocol (v0.5.0)
-- **16/25 Tests Passing**
+- **16/25 Tests Passing (64%)**
 - **Verified:** Health, Auth Dev Mode, Classification, Full Pipeline, Deep Security.
 - **Pending:** Supabase Storage, Load Testing, Edge Cases.
 
-## Roadmap: Micro-PRD 03 (Image Pipeline)
+## Development Roadmap
+
+### Current Progress: 45%
+```
+████████████████░░░░░░░░░░░░░░ 45%
+
+✅ Micro-PRD 01: Auth & Users (100%)
+✅ Micro-PRD 02: Product Persistence (100%)
+⏸️ Micro-PRD 03: Image Pipeline (0%) ← NEXT
+⏸️ Micro-PRD 04: Async Jobs (0%)
+⏸️ Micro-PRD 05: Tech Sheet (0%)
+⏸️ Micro-PRD 06: Workflow Approval (0%)
+```
+
+### Next: Micro-PRD 03 (Image Pipeline)
 1. **Sharp.js / Advanced Composition:** Improved centering and soft shadows.
 2. **Husk Layer:** Quality scoring (resolution, centering, background purity).
 3. **Triple Storage:** Saving original, segmented, and processed versions.
@@ -123,3 +206,30 @@ componentes/
 - **Run Server:** `uvicorn app.main:app --reload --port 8000`
 - **Health Check:** `curl http://localhost:8000/health`
 - **Process Image:** `curl -X POST http://localhost:8000/process -F "file=@image.jpg"`
+- **List Products:** `curl http://localhost:8000/products`
+
+## Configuration
+
+### Required
+- `GEMINI_API_KEY`: Google Gemini API key (fail-fast on startup)
+
+### Optional - Supabase
+- `SUPABASE_URL`: Project URL
+- `SUPABASE_KEY`: Service role key (recommended for server)
+- `SUPABASE_JWT_SECRET`: JWT secret for auth validation
+
+### Optional - Server
+- `AUTH_ENABLED`: Enable JWT validation (default: false)
+- `HOST`: Server host (default: 0.0.0.0)
+- `PORT`: Server port (default: 8000)
+- `DEBUG`: Enable reload mode (default: true)
+
+## Known Issues
+
+1. **RBAC Decorators** (`permissions.py:39`): Decorator pattern incompatible with FastAPI's `*args`. Use `Depends(require_role("admin"))` instead.
+2. **Image Segmentation with Models**: rembg includes people in lifestyle photos. Consider Gemini Vision for product detection.
+
+## Related Documentation
+- `CLAUDE.md` - Detailed project context (1000+ lines)
+- `CODE_REVIEW.md` - Comprehensive code analysis (score: 8.2/10)
+- `FASE_DE_TESTES.md` - Testing protocols and progress

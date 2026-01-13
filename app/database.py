@@ -9,44 +9,41 @@ IMPORTANTE:
 """
 
 from typing import Optional, Dict, Any
-from supabase import Client
+from supabase import Client, create_client
 
 from app.config import settings
-
-# Singleton do Supabase Client
-_client: Optional[Client] = None
 
 
 def get_supabase_client() -> Client:
     """
     Retorna Supabase Client configurado.
-    Reutiliza instância se já criada (singleton).
+    
+    IMPORTANTE: Cria cliente novo a cada chamada (sem singleton/cache).
+    Isso garante que sempre usa a API key atual do .env.
     
     Returns:
-        Supabase Client configurado
+        Client: Supabase Client configurado
     
     Raises:
         ValueError: Se SUPABASE_URL ou SUPABASE_KEY não configurados
     """
-    global _client
-    
-    if _client is None:
-        from supabase import create_client
-        
-        if not settings.SUPABASE_URL or not settings.SUPABASE_KEY:
-            raise ValueError(
-                "SUPABASE_URL e SUPABASE_KEY são obrigatórios. "
-                "Verifique arquivo .env"
-            )
-        
-        _client = create_client(
-            supabase_url=settings.SUPABASE_URL,
-            supabase_key=settings.SUPABASE_KEY
+    if not settings.SUPABASE_URL or not settings.SUPABASE_KEY:
+        raise ValueError(
+            "SUPABASE_URL e SUPABASE_KEY são obrigatórios. "
+            "Verifique arquivo .env"
         )
-        
-        print("[DATABASE] ✓ Supabase Client configurado")
     
-    return _client
+    # Debug: identificar tipo de key sendo usada
+    key_preview = settings.SUPABASE_KEY[:20] + "..." if len(settings.SUPABASE_KEY) > 20 else settings.SUPABASE_KEY
+    print(f"[DATABASE] Creating client with key: {key_preview}")
+    
+    client = create_client(
+        supabase_url=settings.SUPABASE_URL,
+        supabase_key=settings.SUPABASE_KEY
+    )
+    
+    print("[DATABASE] ✓ Client created successfully")
+    return client
 
 
 def get_user_by_id(user_id: str) -> Optional[Dict[str, Any]]:

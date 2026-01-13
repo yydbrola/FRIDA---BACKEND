@@ -4,8 +4,74 @@ Gerenciamento centralizado de variáveis de ambiente e configurações.
 """
 
 import os
+from enum import Enum
 from pathlib import Path
 from dotenv import load_dotenv
+
+
+# =============================================================================
+# Enums para categorias e estilos de produtos
+# =============================================================================
+
+class ProductCategory(str, Enum):
+    """Categorias de produtos suportadas pelo classificador."""
+    BOLSA = "bolsa"
+    LANCHEIRA = "lancheira"
+    GARRAFA_TERMICA = "garrafa_termica"
+    DESCONHECIDO = "desconhecido"
+
+    @classmethod
+    def values(cls) -> list[str]:
+        """Retorna lista de valores válidos."""
+        return [e.value for e in cls]
+
+    @classmethod
+    def is_valid(cls, value: str) -> bool:
+        """Verifica se um valor é uma categoria válida."""
+        return value in cls.values()
+
+
+class ProductStyle(str, Enum):
+    """Estilos de imagem suportados pelo classificador."""
+    SKETCH = "sketch"
+    FOTO = "foto"
+    DESCONHECIDO = "desconhecido"
+
+    @classmethod
+    def values(cls) -> list[str]:
+        """Retorna lista de valores válidos."""
+        return [e.value for e in cls]
+
+    @classmethod
+    def is_valid(cls, value: str) -> bool:
+        """Verifica se um valor é um estilo válido."""
+        return value in cls.values()
+
+
+class ProductStatus(str, Enum):
+    """Status do workflow de produto."""
+    DRAFT = "draft"
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    PUBLISHED = "published"
+
+    @classmethod
+    def values(cls) -> list[str]:
+        """Retorna lista de valores válidos."""
+        return [e.value for e in cls]
+
+
+class ImageType(str, Enum):
+    """Tipos de imagem no pipeline de processamento."""
+    ORIGINAL = "original"
+    SEGMENTED = "segmented"
+    PROCESSED = "processed"
+
+    @classmethod
+    def values(cls) -> list[str]:
+        """Retorna lista de valores válidos."""
+        return [e.value for e in cls]
 
 # Carrega variáveis do .env
 env_path = Path(__file__).parent.parent / ".env"

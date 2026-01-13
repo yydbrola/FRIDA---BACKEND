@@ -4,10 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Status
 
-**Version:** 0.5.0
-**Last Updated:** 2026-01-12
+**Version:** 0.5.1
+**Last Updated:** 2026-01-13
 **Testing Status:** 64% Complete (16/25 tests passing)
 **Production Ready:** Core features ✓ | Edge cases & Load testing pending
+**Development Progress:** 45% (Micro-PRD 02 Complete)
+**Code Review Score:** 8.2/10 (see CODE_REVIEW.md)
 
 ## Project Overview
 
@@ -17,10 +19,13 @@ Frida Orchestrator is a FastAPI backend for fashion product image processing (ba
 - Technical specification generation with premium HTML templates
 - Multi-format image support (JPEG, PNG, WebP)
 - Deep security validation (magic numbers + Pillow integrity checks)
-- Optional Supabase integration for audit trail and storage
+- Supabase integration for storage, database, and audit trail
 - JWT authentication (Supabase Auth) with dev mode
 - **NEW:** Role-Based Access Control (RBAC) with `admin` and `user` roles
 - **NEW:** Database-backed user management via Supabase PostgreSQL
+- **NEW:** Product catalog with workflow management (draft→pending→approved→rejected→published)
+- **NEW:** Product and image tracking with full CRUD endpoints
+- **NEW:** CORS configuration for Next.js frontend integration
 
 ## Project Structure
 
@@ -47,7 +52,9 @@ componentes/
 ├── SQL para o SUPABASE/             # Database migration scripts
 │   ├── 01_create_users_table.sql   # Users table + RLS policies
 │   ├── 02_seed_admin_zero.sql      # Initial admin user
-│   └── 03_seed_team_members.sql    # Team members seed data
+│   ├── 03_seed_team_members.sql    # Team members seed data
+│   ├── 04_create_products.sql      # Products table + workflow (NEW)
+│   └── 05_create_images.sql        # Images table + tracking (NEW)
 ├── venv/                            # Python 3.12 virtual environment
 ├── .env                             # Environment variables (secrets)
 ├── .env.example                     # Template for .env
@@ -56,6 +63,7 @@ componentes/
 ├── CLAUDE.md                        # This file
 ├── GEMINI.md                        # AI model context
 ├── FASE_DE_TESTES.md               # Testing protocols v0.5.0
+├── CODE_REVIEW.md                   # Code review analysis (score: 8.2/10)
 └── .gitignore
 ```
 
@@ -94,7 +102,10 @@ All business logic lives in `app/services/`. The `main.py` handles HTTP routing 
 
 - **StorageService** (`storage.py`): Optional Supabase integration for audit trail. Uploads processed images to `processed-images` bucket with namespace `{user_id}/{product_id}/{timestamp}.png`. Logs metadata to `historico_geracoes` table.
 
-- **Database Module** (`database.py`): Supabase client wrapper for querying `users` table. Provides `get_user_by_id()` and `get_user_by_email()` functions. Uses singleton pattern for client reuse.
+- **Database Module** (`database.py`): Supabase client wrapper for database operations. Creates new client per call (no singleton/cache) to ensure fresh API key usage.
+  - **User queries:** `get_user_by_id()`, `get_user_by_email()`
+  - **Product CRUD:** `create_product()`, `get_user_products()`
+  - **Image CRUD:** `create_image()`
 
 - **Auth Service** (`auth/supabase.py`): JWT validation via PyJWT + user lookup in `users` table. Returns `AuthUser` model with `user_id`, `email`, `role`, and `name`. Supports dev mode with fake user. Enforces that authenticated users must exist in the `users` table (HTTP 403 if not found).
 
@@ -107,11 +118,14 @@ All business logic lives in `app/services/`. The `main.py` handles HTTP routing 
 2. **Validation Layer 2:** Magic numbers check (file signatures)
 3. **Validation Layer 3:** Pillow integrity check (detects corruption)
 4. **Classification:** Gemini 2.0 Flash Lite with Structured Output (guaranteed JSON)
-5. **Background Removal:** rembg U2NET model
-6. **Composition:** White background + resize to 1080x1080px
-7. **Tech Sheet (optional):** Gemini data extraction + Jinja2 HTML rendering
-8. **Storage (optional):** Upload to Supabase + audit log
-9. **Response:** Base64 encoded PNG + metadata
+5. **Database Insert (NEW):** Save product to `products` table with classification result
+6. **Background Removal:** rembg U2NET model
+7. **Composition:** White background + resize to 1080x1080px
+8. **Tech Sheet (optional):** Gemini data extraction + Jinja2 HTML rendering
+9. **Storage (optional):** Upload to Supabase storage bucket
+10. **Database Insert (NEW):** Save image record to `images` table
+11. **Audit (optional):** Log to `historico_geracoes` table
+12. **Response:** Base64 encoded PNG + metadata + product_id
 
 ### Key Design Decisions
 
@@ -125,6 +139,12 @@ All business logic lives in `app/services/`. The `main.py` handles HTTP routing 
 1. Content-Type (fast filter)
 2. Magic numbers (file signatures)
 3. Pillow integrity (structural validation)
+
+**CORS Middleware**: Configured for Next.js frontend integration:
+- Allowed origins: `http://localhost:3000`, `http://127.0.0.1:3000`, `https://*.vercel.app`
+- Credentials: Enabled for JWT cookie support
+- Methods: All HTTP methods allowed
+- Headers: All headers allowed
 
 ## Configuration
 
@@ -160,10 +180,19 @@ Environment variables are managed in `config.py` via `python-dotenv`:
 - Output size: 1080x1080px
 - Background color: #FFFFFF (pure white)
 
+**Product Enums (NEW in v0.5.1):**
+Centralized in `config.py` for type safety and consistency:
+- `ProductCategory`: bolsa, lancheira, garrafa_termica, desconhecido
+- `ProductStyle`: sketch, foto, desconhecido
+- `ProductStatus`: draft, pending, approved, rejected, published
+- `ImageType`: original, segmented, processed
+
 **Storage & Database:**
 - Bucket name: `processed-images`
-- Audit table: `historico_geracoes` (image processing history)
+- Audit table: `historico_geracoes` (image processing history - legacy)
 - Users table: `users` (authentication + RBAC)
+- Products table: `products` (product catalog with workflow)
+- Images table: `images` (image tracking linked to products)
 
 ## Endpoints
 
@@ -222,15 +251,16 @@ Environment variables are managed in `config.py` via `python-dotenv`:
 - **Status Codes:** 200 OK, 400 Bad Request, 503 Service Unavailable
 
 **`POST /process`** ⭐ Main endpoint
-- Complete pipeline: classification + background removal + optional tech sheet
+- Complete pipeline: classification + background removal + database storage + optional tech sheet
 - **Form Data:**
   - `file` (required): Product image
   - `gerar_ficha` (optional): boolean, default=false
-  - `product_id` (optional): string for storage organization
+  - `product_id` (optional): string for storage organization (legacy parameter, unused)
 - **Response:**
   ```json
   {
     "status": "sucesso",
+    "product_id": "uuid-of-created-product",
     "categoria": "bolsa",
     "estilo": "foto",
     "confianca": 0.95,
@@ -250,8 +280,12 @@ Environment variables are managed in `config.py` via `python-dotenv`:
     "mensagem": "Imagem processada com sucesso! user_id=xxx"
   }
   ```
+- **Database Actions (NEW):**
+  - Creates product record in `products` table with classification result
+  - Creates image record in `images` table linked to product
+  - Returns `product_id` for frontend reference
 - **Storage:** If Supabase configured, saves to `{user_id}/{product_id}/{timestamp}.png`
-- **Audit:** Logs to `historico_geracoes` with metadata
+- **Audit:** Logs to `historico_geracoes` with metadata (legacy)
 - **Status Codes:** 200 OK, 400 Bad Request, 422 Validation Error, 500 Server Error
 
 **`GET /auth/test`**
@@ -261,11 +295,68 @@ Environment variables are managed in `config.py` via `python-dotenv`:
   {
     "status": "authenticated",
     "user_id": "00000000-0000-0000-0000-000000000000",
-    "message": "Token JWT válido!"
+    "email": "dev@frida.com",
+    "role": "admin",
+    "name": "Dev User",
+    "message": "Token JWT válido! Usuário cadastrado no sistema."
   }
   ```
-- **Prod Mode Response:** Same but with real user_id from JWT
-- **Status Codes:** 200 OK, 401 Unauthorized (prod mode only)
+- **Prod Mode Response:** Same structure but with real data from JWT + users table
+- **Status Codes:** 200 OK, 401 Unauthorized (prod mode only), 403 Forbidden (user not in database)
+
+### Product Management Endpoints (NEW in v0.5.0)
+
+**`GET /products`**
+- Lists all products for authenticated user
+- **Response:**
+  ```json
+  {
+    "status": "sucesso",
+    "total": 10,
+    "products": [
+      {
+        "id": "uuid",
+        "name": "Bolsa - image.jpg",
+        "sku": null,
+        "category": "bolsa",
+        "classification_result": {"item": "bolsa", "estilo": "foto", "confianca": 0.95},
+        "status": "draft",
+        "created_by": "user_uuid",
+        "created_at": "2026-01-12T10:00:00Z",
+        "updated_at": "2026-01-12T10:00:00Z"
+      }
+    ],
+    "user_id": "user_uuid"
+  }
+  ```
+- **Ordering:** Sorted by `created_at DESC` (newest first)
+- **Status Codes:** 200 OK, 401 Unauthorized, 500 Server Error
+
+**`GET /products/{product_id}`**
+- Gets detailed information for a specific product
+- **Path Parameter:**
+  - `product_id` (required): UUID of the product
+- **Response:**
+  ```json
+  {
+    "status": "sucesso",
+    "product": {
+      "id": "uuid",
+      "name": "Bolsa Premium",
+      "sku": "BAG-001",
+      "category": "bolsa",
+      "classification_result": {...},
+      "status": "approved",
+      "created_by": "user_uuid",
+      "created_at": "2026-01-12T10:00:00Z",
+      "updated_at": "2026-01-12T10:00:00Z"
+    }
+  }
+  ```
+- **Access Control:**
+  - Users can only access their own products
+  - Admins can access all products
+- **Status Codes:** 200 OK, 401 Unauthorized, 403 Forbidden, 404 Not Found, 500 Server Error
 
 ## Type Contracts
 
@@ -488,7 +579,9 @@ def admin_endpoint(user: AuthUser = Depends(get_current_user)):
 
 ## Database Schema & RBAC (NEW in v0.5.0)
 
-### Users Table
+### Database Tables
+
+#### Users Table
 The `users` table stores user information and roles for RBAC:
 
 **Schema:**
@@ -511,12 +604,81 @@ CREATE TABLE public.users (
 - Admins can view all records
 - Policies enforced at database level
 
+#### Products Table (NEW in v0.5.0)
+The `products` table stores product information with workflow status:
+
+**Schema:**
+```sql
+CREATE TABLE public.products (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL,
+  sku TEXT UNIQUE,                  -- Optional SKU for inventory
+  category TEXT,                     -- bolsa, lancheira, garrafa_termica
+  classification_result JSONB,       -- Gemini classification result
+  status TEXT DEFAULT 'draft',       -- Workflow: draft→pending→approved→rejected→published
+  created_by UUID REFERENCES users(id) NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT NOW() NOT NULL  -- Auto-updated via trigger
+);
+```
+
+**Indexes:**
+- `idx_products_created_by` - Filter by creator
+- `idx_products_status` - Filter by workflow status
+- `idx_products_category` - Filter by category
+- `idx_products_sku` - Fast SKU lookups
+
+**Workflow States:**
+- `draft` - Initial state after classification
+- `pending` - Submitted for review
+- `approved` - Approved for production
+- `rejected` - Rejected, needs rework
+- `published` - Published to catalog
+
+**Row Level Security (RLS):**
+- Members (role='user'): CRUD only on own products
+- Admins (role='admin'): Full access to all products
+
+#### Images Table (NEW in v0.5.0)
+The `images` table tracks all images associated with products:
+
+**Schema:**
+```sql
+CREATE TABLE public.images (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  product_id UUID REFERENCES products(id) ON DELETE CASCADE NOT NULL,
+  type TEXT CHECK (type IN ('original', 'segmented', 'processed')) NOT NULL,
+  storage_bucket TEXT NOT NULL,      -- Supabase storage bucket name
+  storage_path TEXT NOT NULL,        -- Full path in storage
+  quality_score INTEGER CHECK (quality_score >= 0 AND quality_score <= 100),
+  created_by UUID REFERENCES users(id) NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW() NOT NULL
+);
+```
+
+**Image Types:**
+- `original` - Original uploaded image
+- `segmented` - After background removal (no background)
+- `processed` - Final processed image (white background, 1080x1080)
+
+**Indexes:**
+- `idx_images_product_id` - Group by product
+- `idx_images_created_by` - Filter by creator
+- `idx_images_type` - Filter by image type
+
+**Row Level Security (RLS):**
+- Members (role='user'): CRUD only on own images
+- Admins (role='admin'): Full access to all images
+- Cascade delete: When product is deleted, all images are deleted
+
 ### Migration Scripts
 Located in `SQL para o SUPABASE/`, execute in order:
 
-1. **`01_create_users_table.sql`**: Creates table + indexes + RLS policies
+1. **`01_create_users_table.sql`**: Creates `users` table + indexes + RLS policies
 2. **`02_seed_admin_zero.sql`**: Inserts initial admin user (requires manual UUID from Supabase Auth)
 3. **`03_seed_team_members.sql`**: Seeds team members (optional)
+4. **`04_create_products.sql`**: Creates `products` table + workflow + RLS policies (NEW)
+5. **`05_create_images.sql`**: Creates `images` table + RLS policies (NEW)
 
 **Setup Process:**
 1. Run `01_create_users_table.sql` in Supabase SQL Editor
@@ -524,6 +686,8 @@ Located in `SQL para o SUPABASE/`, execute in order:
 3. Copy the generated UUID
 4. Edit `02_seed_admin_zero.sql` with the UUID and execute
 5. Optionally run `03_seed_team_members.sql` for team
+6. Run `04_create_products.sql` to create products table
+7. Run `05_create_images.sql` to create images table
 
 ### RBAC Implementation
 Role-based access control is implemented via decorators:
@@ -615,8 +779,283 @@ curl -X POST http://localhost:8000/classify -F "file=@test.jpg"
 6. **HTTP 403 "User not registered":** When `AUTH_ENABLED=true`, user must exist in `users` table. Run migration scripts and create user in Supabase Auth + users table.
 7. **Database errors:** Ensure `SUPABASE_URL` and `SUPABASE_KEY` are configured when using `AUTH_ENABLED=true`
 
+## Critical Issue Resolution: Micro-PRD 02 Blocker (RESOLVED ✅)
+
+### Issue Summary
+**Status:** ✅ RESOLVED (2026-01-13)
+**Duration:** ~4 hours investigation
+**Symptom:** `POST /process` returned `product_id: null` despite successful image processing
+
+### Root Cause
+**Discovered Issue:** service_role lacked GRANT permissions on tables
+
+**Key Discovery:**
+```sql
+-- Verification that revealed the problem:
+SELECT grantee, privilege_type
+FROM information_schema.table_privileges
+WHERE table_name = 'products' AND grantee = 'service_role';
+-- Result: EMPTY (no grants!)
+
+-- However:
+SELECT rolname, rolbypassrls
+FROM pg_roles WHERE rolname = 'service_role';
+-- rolbypassrls = true
+
+-- Critical Insight: bypassrls ≠ bypass GRANT
+-- service_role can ignore RLS, but still needs GRANT on tables
+```
+
+### Investigation Timeline
+Hypotheses tested (chronological order):
+
+1. ❌ Tables don't exist → Discarded (tables existed)
+2. ❌ Invalid FK → Discarded (dev user inserted)
+3. ❌ RLS blocking → Discarded (disabled, error persisted)
+4. ❌ Missing GRANT for anon → Discarded (applied, error persisted)
+5. ⚠️ Singleton caching → Fixed but error persisted (red herring)
+6. ⚠️ Anon key vs service_role → Correct approach, error persisted
+7. ✅ **service_role missing GRANT → ROOT CAUSE**
+
+### Solution Applied
+
+```sql
+-- Critical fix:
+GRANT ALL ON public.products TO service_role;
+GRANT ALL ON public.images TO service_role;
+GRANT ALL ON public.users TO service_role;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO service_role;
+```
+
+### Code Modifications
+
+**app/database.py:**
+- ✅ Singleton removed (best practice, though not the root cause)
+- ✅ Debug prints added
+- ✅ New client created per call
+
+**.env:**
+- ✅ service_role key verified and configured
+
+**Supabase Database:**
+- ✅ GRANTs applied to service_role
+
+### Validation Results
+
+```bash
+# Test command:
+curl -X POST http://localhost:8000/process -F "file=@bolsa_teste.jpg"
+
+# Response:
+{
+  "product_id": "291c7351-136b-477f-9505-92b7c31dfef6",  ✅ SUCCESS!
+  "categoria": "bolsa",
+  "estilo": "foto",
+  "confianca": 0.95
+}
+```
+
+```sql
+-- Database verification:
+SELECT * FROM products WHERE id = '291c7351-136b-477f-9505-92b7c31dfef6';
+-- 1 row returned ✅
+
+SELECT * FROM images WHERE product_id = '291c7351-136b-477f-9505-92b7c31dfef6';
+-- 1 row returned ✅
+```
+
+### Lessons Learned
+
+1. **rolbypassrls ≠ superuser**: Role with RLS bypass still requires explicit GRANTs
+2. **Supabase doesn't auto-grant**: Manually created tables need explicit grants
+3. **JWT verification is essential**: Decoding payload confirms actual role
+4. **Singletons complicate debugging**: Persistent state between reloads masks issues
+
+### Prevention Template
+
+```sql
+-- Template for new tables:
+CREATE TABLE public.new_table (...);
+
+-- ALWAYS add after CREATE:
+GRANT ALL ON public.new_table TO service_role;
+GRANT ALL ON public.new_table TO anon;
+GRANT ALL ON public.new_table TO authenticated;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO service_role;
+```
+
+### Impact
+- ✅ Micro-PRD 02: Product Persistence → **100% COMPLETE**
+- ✅ Products saving correctly to database
+- ✅ Images tracked with FK integrity
+- ✅ `product_id` returning valid UUID
+- 🎯 Ready for Micro-PRD 03: Image Pipeline
+
+---
+
+## Bug Fixes Applied (v0.5.1)
+
+### ✅ JSON Parsing Bug (FIXED)
+
+**File:** `utils.py:49-114`
+**Severity:** 🔴 High
+**Status:** ✅ RESOLVED
+
+**Problem:** The regex `r'\{[^{}]*\}'` didn't capture nested JSON objects.
+
+```python
+# Before (BROKEN):
+match = re.search(r'\{[^{}]*\}', texto)
+# Failed on: {"nome": "Bolsa", "dimensoes": {"altura": "30cm"}}
+# Returned only: {"altura": "30cm"}  ← WRONG!
+```
+
+**Solution:** Replaced regex with bracket-counting algorithm that properly handles:
+- Nested objects
+- Escaped characters in strings
+- Multiple JSON objects in text
+
+```python
+# After (FIXED):
+def safe_json_parse(text: str) -> Optional[dict]:
+    # Uses depth counting: tracks { and } while respecting strings
+    depth = 0
+    in_string = False
+    for char in text:
+        if char == '"': in_string = not in_string
+        if not in_string:
+            if char == '{': depth += 1
+            elif char == '}': depth -= 1
+        if depth == 0: # Found complete object
+            return json.loads(extracted)
+```
+
+**Impact:** Tech sheet data with `dimensoes` field now parsed correctly.
+
+### ✅ Product Enums Added (IMPROVEMENT)
+
+**File:** `config.py:16-74`
+**Status:** ✅ IMPLEMENTED
+
+Added centralized Enums to eliminate magic strings:
+
+```python
+from app.config import ProductCategory, ProductStyle, ProductStatus, ImageType
+
+# Usage examples:
+ProductCategory.BOLSA.value  # "bolsa"
+ProductCategory.is_valid("lancheira")  # True
+ProductStatus.values()  # ["draft", "pending", "approved", "rejected", "published"]
+```
+
+**Benefits:**
+- Type safety with IDE autocomplete
+- Single source of truth for valid values
+- Helper methods: `values()`, `is_valid()`
+
+### ⚠️ Known Issue: RBAC Decorators (NOT FIXED)
+
+**File:** `permissions.py:39`
+**Severity:** 🟡 Medium
+**Status:** ❌ NOT FIXED (see CODE_REVIEW.md)
+
+The `@require_admin` decorator pattern is incompatible with FastAPI's dependency injection when using `*args`. Routes currently rely on `Depends(get_current_user)` directly.
+
+**Workaround:** Use dependency injection pattern instead of decorators:
+```python
+# Instead of @require_admin decorator:
+from app.auth.permissions import require_role
+
+@app.delete("/users/{id}")
+def delete_user(user: AuthUser = Depends(require_role("admin"))):
+    ...
+```
+
+---
+
+## Development Roadmap & Progress
+
+### Completed Micro-PRDs
+
+#### ✅ Micro-PRD 01: Authentication & Users (100%)
+**Completed:** 2026-01-12
+- JWT authentication with Supabase Auth
+- RBAC with admin/user roles
+- User management with RLS policies
+- Dev mode for local development
+
+#### ✅ Micro-PRD 02: Product Persistence (100%)
+**Completed:** 2026-01-13
+- Products table with workflow (draft→pending→approved→rejected→published)
+- Images table with cascade delete
+- Database CRUD operations
+- service_role GRANT resolution
+
+### Current Progress
+```
+████████████████░░░░░░░░░░░░░░ 45%
+
+Micro-PRD 00: ⏭️ Skipped
+Micro-PRD 01: ✅ 100% (Auth & Users)
+Micro-PRD 02: ✅ 100% (Product Persistence)  ← COMPLETE!
+Micro-PRD 03: ⏸️   0% (Image Pipeline)        ← NEXT (TODAY)
+Micro-PRD 04: ⏸️   0% (Async Jobs)
+Micro-PRD 05: ⏸️   0% (Tech Sheet)
+Micro-PRD 06: ⏸️   0% (Workflow Approval)
+```
+
+### Next Steps: Micro-PRD 03 (Image Pipeline)
+**Estimated Duration:** 4-5 hours
+**Target Completion:** 2026-01-13 EOD
+
+**Tasks:**
+1. **Sharp.js Integration (2h)**
+   - Install Sharp for Python or use Node.js
+   - Create `app/services/sharp_service.py`
+   - Implement `composite_white_background()`:
+     - White background #FFFFFF
+     - Centered composition (80-90% frame)
+     - Soft drop shadow
+     - Resize ≥1200px
+
+2. **Husk Layer Validation (1.5h)**
+   - Create `app/services/husk_layer.py`
+   - Implement `calculate_quality_score()`:
+     - Verify resolution ≥1200px
+     - Check centering (delta < 10%)
+     - Verify background purity (RGB < 5)
+     - Return score 0-100
+   - Test threshold (score ≥80)
+
+3. **Multiple Image Storage (1h)**
+   - Modify `POST /process`
+   - Save 3 records in images table:
+     - `type='original'` → raw bucket
+     - `type='segmented'` → segmented bucket
+     - `type='processed'` → processed bucket
+   - Test FK integrity
+
+4. **Final Validation (30min)**
+   - Process 10 varied images
+   - Verify all three image types saved
+   - Confirm quality scores
+
+### Timeline (Revised)
+```
+✅ Micro-PRD 02: 13/01 (COMPLETE)
+⏳ Micro-PRD 03: 13/01 (TODAY - 4-5h)
+⏳ Micro-PRD 04: 14-17/01 (4 days)
+⏳ Micro-PRD 05: 20-24/01 (5 days)
+⏳ Micro-PRD 06: 27-31/01 (5 days)
+
+MVP COMPLETE: ~31/01/2026 (18 days remaining)
+```
+
+---
+
 ## Related Documentation
 
+- `CODE_REVIEW.md` - **NEW:** Comprehensive code review (score: 8.2/10)
 - `FASE_DE_TESTES.md` - Complete testing protocols and progress
 - `GEMINI.md` - AI model context and prompts
 - `README.md` - Project overview and setup
@@ -624,5 +1063,6 @@ curl -X POST http://localhost:8000/classify -F "file=@test.jpg"
 
 ---
 
-**Last Updated:** 2026-01-12
+**Last Updated:** 2026-01-13
+**Current Phase:** Micro-PRD 03 (Image Pipeline)
 **For Questions:** Refer to test results in FASE_DE_TESTES.md or check git history for context

@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel
 from typing import Optional
 
-from app.config import settings
+from app.config import settings, APP_VERSION
 from app.utils import validate_image_file, validate_image_deep, generate_filename
 from app.services.classifier import ClassifierService
 from app.services.background_remover import BackgroundRemoverService
@@ -29,7 +29,7 @@ from app.database import create_product, get_user_products, create_image, get_su
 app = FastAPI(
     title="Frida Orchestrator",
     description="Backend de processamento de imagens e IA para produtos de moda",
-    version="0.5.0",
+    version=APP_VERSION,
     docs_url="/docs",
     redoc_url="/redoc"
 )

@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 # Versão do Aplicativo (Centralizada)
 # =============================================================================
 
-APP_VERSION = "0.5.3"
+APP_VERSION = "0.5.4"
 # Enums para categorias e estilos de produtos
 # =============================================================================
 

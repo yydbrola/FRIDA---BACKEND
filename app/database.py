@@ -625,3 +625,326 @@ def get_user_jobs(user_id: str, limit: int = 20) -> list:
     except Exception as e:
         print(f"[DATABASE] ✗ Erro ao listar jobs do usuário: {str(e)}")
         return []
+
+
+# =============================================================================
+# TECHNICAL SHEETS CRUD (PRD-05)
+# =============================================================================
+
+def create_technical_sheet(
+    product_id: str,
+    user_id: str,
+    data: Optional[dict] = None
+) -> Optional[str]:
+    """
+    Cria uma nova ficha técnica para um produto.
+    
+    Args:
+        product_id: UUID do produto (deve ser único)
+        user_id: UUID do usuário criador
+        data: Dados iniciais da ficha (opcional)
+    
+    Returns:
+        sheet_id se sucesso, None se falha
+    """
+    try:
+        client = get_supabase_client()
+        
+        # Data default com schema
+        sheet_data = data if data else {"_version": 1, "_schema": "bag_v1"}
+        
+        # Garantir que _version e _schema existam
+        if "_version" not in sheet_data:
+            sheet_data["_version"] = 1
+        if "_schema" not in sheet_data:
+            sheet_data["_schema"] = "bag_v1"
+        
+        insert_data = {
+            "product_id": product_id,
+            "created_by": user_id,
+            "data": sheet_data,
+            "status": "draft",
+            "version": 1
+        }
+        
+        response = client.table("technical_sheets")\
+            .insert(insert_data)\
+            .execute()
+        
+        if response.data and len(response.data) > 0:
+            sheet_id = response.data[0]["id"]
+            print(f"[DATABASE] ✓ Technical sheet criada: {sheet_id}")
+            return sheet_id
+        
+        print("[DATABASE] ✗ Nenhum dado retornado ao criar sheet")
+        return None
+        
+    except Exception as e:
+        print(f"[DATABASE] ✗ Erro ao criar technical sheet: {str(e)}")
+        return None
+
+
+def get_technical_sheet(sheet_id: str) -> Optional[dict]:
+    """
+    Busca ficha técnica por ID.
+    
+    Args:
+        sheet_id: UUID da ficha
+    
+    Returns:
+        Dict com dados da ficha ou None
+    """
+    try:
+        client = get_supabase_client()
+        
+        response = client.table("technical_sheets")\
+            .select("*")\
+            .eq("id", sheet_id)\
+            .single()\
+            .execute()
+        
+        if response.data:
+            print(f"[DATABASE] ✓ Sheet encontrada: {sheet_id}")
+            return response.data
+        
+        return None
+        
+    except Exception as e:
+        print(f"[DATABASE] ✗ Erro ao buscar sheet {sheet_id}: {str(e)}")
+        return None
+
+
+def get_sheet_by_product(product_id: str) -> Optional[dict]:
+    """
+    Busca ficha técnica pelo product_id.
+    
+    Args:
+        product_id: UUID do produto
+    
+    Returns:
+        Dict com dados da ficha ou None (não loga erro se não existe)
+    """
+    try:
+        client = get_supabase_client()
+        
+        response = client.table("technical_sheets")\
+            .select("*")\
+            .eq("product_id", product_id)\
+            .execute()
+        
+        # Pode não existir ainda - não é erro
+        if response.data and len(response.data) > 0:
+            print(f"[DATABASE] ✓ Sheet encontrada para product: {product_id}")
+            return response.data[0]
+        
+        # Não encontrou - retorna None silenciosamente
+        return None
+        
+    except Exception as e:
+        # Só loga se for erro real (não "no rows")
+        if "no rows" not in str(e).lower():
+            print(f"[DATABASE] ✗ Erro ao buscar sheet por product: {str(e)}")
+        return None
+
+
+def update_technical_sheet(
+    sheet_id: str,
+    data: dict,
+    user_id: str,
+    change_summary: Optional[str] = None
+) -> bool:
+    """
+    Atualiza dados da ficha técnica.
+    O trigger de versionamento cuida de incrementar versão e arquivar.
+    
+    Args:
+        sheet_id: UUID da ficha
+        data: Novos dados (JSONB)
+        user_id: UUID do usuário que está alterando
+        change_summary: Descrição opcional da mudança
+    
+    Returns:
+        True se sucesso, False se falha
+    """
+    try:
+        client = get_supabase_client()
+        
+        # Buscar sheet atual para preservar metadados
+        current = get_technical_sheet(sheet_id)
+        if not current:
+            print(f"[DATABASE] ✗ Sheet não encontrada: {sheet_id}")
+            return False
+        
+        # Mesclar dados preservando _version e _schema se não fornecidos
+        current_data = current.get("data", {})
+        new_data = {**data}
+        
+        if "_version" not in new_data:
+            new_data["_version"] = current_data.get("_version", 1)
+        if "_schema" not in new_data:
+            new_data["_schema"] = current_data.get("_schema", "bag_v1")
+        
+        update_payload = {
+            "data": new_data
+        }
+        
+        response = client.table("technical_sheets")\
+            .update(update_payload)\
+            .eq("id", sheet_id)\
+            .execute()
+        
+        if response.data:
+            new_version = response.data[0].get("version", "?")
+            print(f"[DATABASE] ✓ Sheet atualizada: {sheet_id} (v{new_version})")
+            return True
+        
+        return False
+        
+    except Exception as e:
+        print(f"[DATABASE] ✗ Erro ao atualizar sheet: {str(e)}")
+        return False
+
+
+def update_sheet_status(
+    sheet_id: str,
+    status: str,
+    user_id: str,
+    rejection_comment: Optional[str] = None
+) -> bool:
+    """
+    Atualiza status da ficha técnica.
+    
+    Args:
+        sheet_id: UUID da ficha
+        status: Novo status (draft/pending/approved/rejected/published)
+        user_id: UUID do usuário que está alterando
+        rejection_comment: Comentário se status = rejected
+    
+    Returns:
+        True se sucesso, False se falha
+    """
+    valid_statuses = ["draft", "pending", "approved", "rejected", "published"]
+    if status not in valid_statuses:
+        print(f"[DATABASE] ✗ Status inválido: {status}")
+        return False
+    
+    try:
+        client = get_supabase_client()
+        
+        update_payload = {"status": status}
+        
+        # Se aprovado, registrar quem aprovou e quando
+        if status == "approved":
+            from datetime import datetime
+            update_payload["approved_by"] = user_id
+            update_payload["approved_at"] = datetime.utcnow().isoformat()
+        
+        # Se rejeitado, registrar comentário
+        if status == "rejected" and rejection_comment:
+            update_payload["rejection_comment"] = rejection_comment
+        
+        response = client.table("technical_sheets")\
+            .update(update_payload)\
+            .eq("id", sheet_id)\
+            .execute()
+        
+        if response.data:
+            print(f"[DATABASE] ✓ Sheet status atualizado: {sheet_id} → {status}")
+            return True
+        
+        return False
+        
+    except Exception as e:
+        print(f"[DATABASE] ✗ Erro ao atualizar status da sheet: {str(e)}")
+        return False
+
+
+def get_sheet_versions(sheet_id: str) -> list:
+    """
+    Lista histórico de versões de uma ficha.
+    
+    Args:
+        sheet_id: UUID da ficha
+    
+    Returns:
+        Lista de versões ordenada por version DESC (mais recente primeiro)
+    """
+    try:
+        client = get_supabase_client()
+        
+        response = client.table("technical_sheet_versions")\
+            .select("*")\
+            .eq("sheet_id", sheet_id)\
+            .order("version", desc=True)\
+            .execute()
+        
+        versions = response.data if response.data else []
+        print(f"[DATABASE] ✓ {len(versions)} versões encontradas para sheet")
+        return versions
+        
+    except Exception as e:
+        print(f"[DATABASE] ✗ Erro ao listar versões da sheet: {str(e)}")
+        return []
+
+
+def get_sheet_version(sheet_id: str, version: int) -> Optional[dict]:
+    """
+    Busca uma versão específica da ficha.
+    
+    Args:
+        sheet_id: UUID da ficha
+        version: Número da versão
+    
+    Returns:
+        Dict com dados da versão ou None
+    """
+    try:
+        client = get_supabase_client()
+        
+        response = client.table("technical_sheet_versions")\
+            .select("*")\
+            .eq("sheet_id", sheet_id)\
+            .eq("version", version)\
+            .single()\
+            .execute()
+        
+        if response.data:
+            print(f"[DATABASE] ✓ Versão {version} encontrada")
+            return response.data
+        
+        return None
+        
+    except Exception as e:
+        print(f"[DATABASE] ✗ Erro ao buscar versão {version}: {str(e)}")
+        return None
+
+
+def delete_technical_sheet(sheet_id: str) -> bool:
+    """
+    Deleta ficha técnica (CASCADE deleta versões automaticamente).
+    
+    Args:
+        sheet_id: UUID da ficha
+    
+    Returns:
+        True se sucesso, False se falha
+    """
+    try:
+        client = get_supabase_client()
+        
+        response = client.table("technical_sheets")\
+            .delete()\
+            .eq("id", sheet_id)\
+            .execute()
+        
+        # Delete retorna dados deletados
+        if response.data:
+            print(f"[DATABASE] ✓ Sheet deletada: {sheet_id}")
+            return True
+        
+        print(f"[DATABASE] ⚠ Nenhuma sheet deletada (pode não existir)")
+        return False
+        
+    except Exception as e:
+        print(f"[DATABASE] ✗ Erro ao deletar sheet: {str(e)}")
+        return False

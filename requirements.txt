@@ -12,3 +12,9 @@ supabase==2.7.0
 # Authentication
 PyJWT==2.8.0
 cryptography==41.0.7
+
+# Rate Limiting
+slowapi==0.1.9
+
+# PDF Generation (PRD-05)
+reportlab==4.4.7

@@ -12,6 +12,7 @@ Este documento registra o processo de implementação, testes e resultados das f
 - [Bug Fixes v0.5.3](#bug-fixes-v053)
 - [Micro-PRD 04: Jobs Async](#micro-prd-04-jobs-async)
 - [Bug Fixes v0.5.4](#bug-fixes-v054)
+- [Micro-PRD 05: Technical Sheets](#micro-prd-05-technical-sheets)
 
 ---
 
@@ -1162,3 +1163,374 @@ _current_job_id: True
 
 *Documentado por: Antigravity (Google DeepMind)*  
 *Data: 2026-01-14 01:45 BRT*
+
+---
+
+# Micro-PRD 05: Technical Sheets
+
+**Data:** 2026-01-14  
+**Fase Atual:** 1 de 5  
+**Status:** ✅ FASE 1 COMPLETA
+
+## Objetivo
+
+Implementar sistema de fichas técnicas para produtos de moda com:
+- Armazenamento estruturado em JSONB
+- Versionamento automático a cada alteração
+- Workflow de aprovação (draft → published)
+- Histórico completo de versões
+
+---
+
+## Estado Inicial da Base de Dados
+
+Antes de iniciar o PRD-05, o banco Supabase continha:
+
+| Tabela | Rows | RLS | Status |
+|--------|------|-----|--------|
+| `users` | 2 | ✅ | Existente |
+| `products` | 9 | ✅ | Existente |
+| `images` | * | ✅ | Existente |
+| `jobs` | * | ✅ | Existente |
+| `technical_sheets` | - | - | ❌ NÃO EXISTE |
+| `technical_sheet_versions` | - | - | ❌ NÃO EXISTE |
+
+---
+
+## Fase 1: SQL Schema
+
+### Objetivo da Fase
+
+Criar script SQL para:
+1. Tabela `technical_sheets` (ficha atual)
+2. Tabela `technical_sheet_versions` (histórico)
+3. Trigger de auto-versionamento
+4. RLS policies dual-mode
+
+### Arquivo Criado
+
+`SQL para o SUPABASE/08_create_technical_sheets.sql`
+
+---
+
+## Erro Encontrado na Primeira Execução
+
+### Erro
+
+```
+Error: Failed to run sql query: ERROR: 42P01: 
+relation "public.technical_sheets" does not exist
+```
+
+### Causa Raiz
+
+O script original tentava dropar triggers de uma tabela inexistente:
+
+```sql
+-- PROBLEMA: Tentando dropar trigger de tabela inexistente
+DROP TRIGGER IF EXISTS trigger_save_sheet_version ON public.technical_sheets;
+```
+
+O PostgreSQL exige que a tabela referenciada em `DROP TRIGGER ... ON tabela` exista. O `IF EXISTS` só ignora se **o trigger não existe**, não se **a tabela não existe**.
+
+### Por que ocorreu
+
+Na **primeira execução** do script, as tabelas ainda não existiam. O comando falhou antes de criar as tabelas porque tentou dropar triggers de tabelas inexistentes.
+
+---
+
+## Plano de Correção
+
+### Solução
+
+Reorganizar a ordem do cleanup:
+
+```sql
+-- ANTES (problemático)
+DROP TRIGGER IF EXISTS ... ON public.technical_sheets;  -- ❌ FALHA
+DROP POLICY IF EXISTS ... ON public.technical_sheets;   -- ❌ FALHA
+DROP TABLE IF EXISTS public.technical_sheets CASCADE;
+
+-- DEPOIS (correto)
+DROP TABLE IF EXISTS public.technical_sheets CASCADE;   -- ✅ Funciona
+-- CASCADE remove triggers e policies automaticamente!
+```
+
+### Mudanças Aplicadas
+
+| Aspecto | Original | Corrigido |
+|---------|----------|-----------|
+| Ordem cleanup | Triggers/policies primeiro | Tables CASCADE primeiro |
+| Drop funções | Apenas 1 | Inclui ambas as funções |
+| RLS versions | 8 policies | 7 policies (removida update redundante) |
+
+---
+
+## Resultado Após Correção
+
+### Verificação via Supabase MCP
+
+Consulta realizada em: **2026-01-14 11:54 BRT**
+
+```
+mcp_supabase-mcp-server_list_tables(project_id="guulscxyzafkubntpvaf")
+```
+
+### Tabelas Confirmadas
+
+| Tabela | RLS | Rows | FKs |
+|--------|-----|------|-----|
+| `technical_sheets` | ✅ Enabled | 0 | 3 FKs |
+| `technical_sheet_versions` | ✅ Enabled | 0 | 2 FKs |
+
+### Estrutura `technical_sheets`
+
+| Coluna | Tipo | Constraint |
+|--------|------|------------|
+| `id` | UUID | PK, default gen_random_uuid() |
+| `product_id` | UUID | FK → products, UNIQUE |
+| `version` | INTEGER | DEFAULT 1 |
+| `data` | JSONB | DEFAULT {"_version": 1, "_schema": "bag_v1"} |
+| `status` | TEXT | CHECK (draft/pending/approved/rejected/published) |
+| `rejection_comment` | TEXT | nullable |
+| `created_by` | UUID | FK → users |
+| `approved_by` | UUID | FK → users, nullable |
+| `approved_at` | TIMESTAMPTZ | nullable |
+| `created_at` | TIMESTAMPTZ | DEFAULT NOW() |
+| `updated_at` | TIMESTAMPTZ | DEFAULT NOW() |
+
+### Estrutura `technical_sheet_versions`
+
+| Coluna | Tipo | Constraint |
+|--------|------|------------|
+| `id` | UUID | PK |
+| `sheet_id` | UUID | FK → technical_sheets, CASCADE |
+| `version` | INTEGER | UNIQUE(sheet_id, version) |
+| `data` | JSONB | Snapshot da versão |
+| `change_summary` | TEXT | nullable |
+| `changed_by` | UUID | FK → users |
+| `changed_at` | TIMESTAMPTZ | DEFAULT NOW() |
+
+### Foreign Keys Confirmadas
+
+```
+technical_sheets.product_id → products.id (CASCADE DELETE)
+technical_sheets.created_by → users.id
+technical_sheets.approved_by → users.id
+technical_sheet_versions.sheet_id → technical_sheets.id (CASCADE DELETE)
+technical_sheet_versions.changed_by → users.id
+```
+
+---
+
+## Status Final Fase 1
+
+| Item | Status |
+|------|--------|
+| Tabela `technical_sheets` | ✅ CRIADA |
+| Tabela `technical_sheet_versions` | ✅ CRIADA |
+| Trigger `updated_at` | ✅ ATIVO |
+| Trigger `save_sheet_version` | ✅ ATIVO |
+| RLS Policies | ✅ 7 policies ativas |
+| Índices | ✅ 5 criados |
+| GRANTS | ✅ Aplicados |
+
+**Fase 1:** ✅ **COMPLETA**
+
+---
+
+## Fase 2: CRUD Functions
+
+**Data:** 2026-01-14  
+**Arquivo:** `app/database.py`
+
+### Funções Implementadas
+
+| Função | Retorno | Descrição |
+|--------|---------|-----------|
+| `create_technical_sheet()` | `Optional[str]` | Cria ficha, retorna sheet_id |
+| `get_technical_sheet()` | `Optional[dict]` | Busca por ID |
+| `get_sheet_by_product()` | `Optional[dict]` | Busca por product_id |
+| `update_technical_sheet()` | `bool` | Atualiza dados (trigger incrementa versão) |
+| `update_sheet_status()` | `bool` | Atualiza workflow status |
+| `get_sheet_versions()` | `list` | Lista histórico de versões |
+| `get_sheet_version()` | `Optional[dict]` | Busca versão específica |
+| `delete_technical_sheet()` | `bool` | Remove ficha (CASCADE) |
+
+**Total:** +320 linhas adicionadas ao `database.py`
+
+**Status:** ✅ COMPLETA
+
+---
+
+## Fase 3: REST Endpoints
+
+**Data:** 2026-01-14  
+**Arquivo:** `app/main.py`
+
+### Endpoints Implementados
+
+| Método | Endpoint | Descrição |
+|--------|----------|-----------|
+| POST | `/products/{product_id}/sheet` | Criar/obter ficha |
+| GET | `/products/{product_id}/sheet` | Buscar ficha |
+| PUT | `/products/{product_id}/sheet` | Atualizar dados |
+| PATCH | `/products/{product_id}/sheet/status` | Atualizar status |
+| GET | `/products/{product_id}/sheet/versions` | Listar versões |
+| GET | `/products/{product_id}/sheet/versions/{version}` | Versão específica |
+| DELETE | `/products/{product_id}/sheet` | Deletar (só draft) |
+
+### Pydantic Models
+
+- `SheetDataInput` - Dados estruturados (dimensions, materials, colors, etc)
+- `SheetCreateRequest` / `SheetUpdateRequest` / `SheetStatusUpdateRequest`
+- `SheetResponse` / `SheetVersionResponse` / `SheetVersionsListResponse`
+
+**Total:** +340 linhas (7 endpoints + 7 models)
+
+**Status:** ✅ COMPLETA
+
+---
+
+## Fase 4: PDF Export
+
+**Data:** 2026-01-14  
+**Arquivo:** `app/services/pdf_generator.py` (novo)
+
+### Dependência Instalada
+
+```bash
+pip install reportlab  # v4.4.7
+```
+
+### Classe TechnicalSheetPDFGenerator
+
+**Estilos customizados:**
+- `FridaTitle`: 24px, #1a1a1a, center, bold
+- `FridaSubtitle`: 14px, #666666, center
+- `FridaSection`: 12px, #1a1a1a, bold
+- `FridaBody`: 10px, #333333
+
+**Seções do PDF:**
+1. Header: "FRIDA" + "Ficha Técnica de Produto"
+2. Identificação: categoria, SKU, status, versão
+3. Imagem do produto (se disponível)
+4. Dimensões / Materiais / Cores / Peso
+5. Fornecedor / Instruções de cuidado
+6. Footer: data geração + versão
+
+### Endpoint Adicionado
+
+```
+GET /products/{product_id}/sheet/export/pdf
+```
+
+Response: `StreamingResponse` com `Content-Type: application/pdf`
+
+**Total:** ~310 linhas (`pdf_generator.py`) + ~80 linhas endpoint
+
+**Status:** ✅ COMPLETA
+
+---
+
+## Fase 5: Test Suite
+
+**Data:** 2026-01-14  
+**Arquivo:** `scripts/test_prd05_sheets.py` (novo)
+
+### Estrutura dos Testes
+
+**Database CRUD Tests (6 testes):**
+1. `create_technical_sheet()` → retorna sheet_id
+2. `get_technical_sheet()` → version=1
+3. `get_sheet_by_product()` → encontra
+4. `update_technical_sheet()` → version=2 (auto-increment)
+5. `get_sheet_versions()` → lista versões arquivadas
+6. `delete_technical_sheet()` → remove com CASCADE
+
+**API Endpoint Tests (5 testes):**
+1. POST `/products/{id}/sheet` → status 200
+2. GET `/products/{id}/sheet` → version retornada
+3. PUT `/products/{id}/sheet` → version incrementa
+4. GET `/products/{id}/sheet/versions` → total retornado
+5. GET `/products/{id}/sheet/export/pdf` → application/pdf
+
+### Resultado dos Testes
+
+```
+🧪 PRD-05 Test Suite - 2026-01-14 12:39
+
+============================================================
+ DATABASE CRUD TESTS
+============================================================
+
+✓ create_technical_sheet() → sheet_id=13393448-d4f...
+✓ get_technical_sheet() → version=1
+✓ get_sheet_by_product() → found
+✓ update_technical_sheet() → version=2
+✓ get_sheet_versions() → 1 versions
+✓ delete_technical_sheet() → deleted
+
+Tests passed: 6/6 (100%)
+
+============================================================
+ API ENDPOINT TESTS
+============================================================
+
+✓ POST /products/{id}/sheet → sheet_id=02a92cdf-e6e...
+✓ GET /products/{id}/sheet → version=1
+✓ PUT /products/{id}/sheet → version=2
+✓ GET /products/{id}/sheet/versions → total=1
+✓ GET /products/{id}/sheet/export/pdf → 2274 bytes
+
+Tests passed: 5/5 (100%)
+
+============================================================
+ SUMMARY: 11/11 (100%) ✅ ALL TESTS PASSED!
+============================================================
+```
+
+**Status:** ✅ COMPLETA
+
+---
+
+## PRD-05 Status Final
+
+| Fase | Descrição | Linhas | Status |
+|------|-----------|--------|--------|
+| 1 | SQL Schema | ~220 | ✅ COMPLETA |
+| 2 | CRUD Functions | +320 | ✅ COMPLETA |
+| 3 | REST Endpoints | +340 | ✅ COMPLETA |
+| 4 | PDF Export | +390 | ✅ COMPLETA |
+| 5 | Test Suite | +340 | ✅ COMPLETA |
+
+**Total de código:** ~1610 linhas
+
+### Arquivos Criados/Modificados
+
+| Arquivo | Tipo | Linhas |
+|---------|------|--------|
+| `SQL para o SUPABASE/08_create_technical_sheets.sql` | Novo | 220 |
+| `app/database.py` | Modificado | +320 |
+| `app/main.py` | Modificado | +420 |
+| `app/services/pdf_generator.py` | Novo | 310 |
+| `scripts/test_prd05_sheets.py` | Novo | 340 |
+
+### Features Entregues
+
+- ✅ Fichas técnicas com JSONB estruturado
+- ✅ Versionamento automático a cada alteração
+- ✅ Workflow: draft → pending → approved/rejected → published
+- ✅ Histórico completo de versões
+- ✅ Export PDF profissional com imagem do produto
+- ✅ RLS dual-mode (dev + prod)
+- ✅ Suite de testes completa (11/11 passing)
+
+---
+
+**Micro-PRD 05:** ✅ **COMPLETO**
+
+---
+
+*Documentado por: Antigravity (Google DeepMind)*  
+*Data: 2026-01-14 12:41 BRT*

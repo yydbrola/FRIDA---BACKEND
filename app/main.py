@@ -5,13 +5,18 @@ Ponto de entrada da API e definição das rotas de upload e processamento.
 
 import io
 import base64
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from contextlib import asynccontextmanager
+
+# Rate Limiting
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from app.config import settings, APP_VERSION
 from app.utils import validate_image_file, validate_image_deep, generate_filename
@@ -21,8 +26,16 @@ from app.services.tech_sheet import TechSheetService
 from app.services.storage import StorageService
 from app.services.image_pipeline import image_pipeline_sync
 from app.auth import get_current_user, AuthUser
-from app.database import create_product, get_user_products, create_image, get_supabase_client, create_job, get_job, get_user_jobs
+from app.database import (
+    create_product, get_user_products, create_image, get_supabase_client,
+    create_job, get_job, get_user_jobs,
+    # Technical Sheets CRUD (PRD-05)
+    create_technical_sheet, get_technical_sheet, get_sheet_by_product,
+    update_technical_sheet, update_sheet_status,
+    get_sheet_versions, get_sheet_version, delete_technical_sheet
+)
 from app.services.job_worker import job_daemon
+from app.services.pdf_generator import pdf_generator
 
 
 # =============================================================================
@@ -38,6 +51,11 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
+
+# Rate Limiting Configuration
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # CORS para permitir requests do frontend Next.js
 app.add_middleware(
@@ -307,7 +325,7 @@ async def root():
     </head>
     <body>
         <h1>FRIDA ORCHESTRATOR</h1>
-        <p>Backend de processamento de imagens e IA v0.5.0</p>
+        <p>Backend de processamento de imagens e IA v{APP_VERSION}</p>
         <p><a href="/docs">📖 Documentação Swagger</a></p>
         <p><a href="/health">💚 Health Check</a></p>
     </body>
@@ -366,7 +384,7 @@ async def health_check():
     
     return HealthResponse(
         status=status,
-        version="0.5.0",
+        version=APP_VERSION,
         gemini_configured=bool(settings.GEMINI_API_KEY),
         services=services_status,
         ready=all_critical_ok,
@@ -375,8 +393,10 @@ async def health_check():
     )
 
 
+@limiter.limit("5/minute")
 @app.post("/process", response_model=ProcessResponse)
 def processar_produto(
+    request: Request,
     file: UploadFile = File(..., description="Imagem do produto para processar"),
     gerar_ficha: bool = Form(False, description="Se True, gera ficha técnica premium"),
     product_id: Optional[str] = Form(None, description="ID do produto para organizar storage"),
@@ -565,8 +585,10 @@ def processar_produto(
 # Async Processing Endpoint (PRD-04)
 # =============================================================================
 
+@limiter.limit("10/minute")
 @app.post("/process-async", response_model=ProcessAsyncResponse)
 def processar_produto_async(
+    request: Request,
     file: UploadFile = File(..., description="Imagem do produto para processar"),
     user: AuthUser = Depends(get_current_user)
 ):
@@ -862,8 +884,10 @@ def list_user_jobs_endpoint(
     )
 
 
+@limiter.limit("10/minute")
 @app.post("/classify")
 def classificar_apenas(
+    request: Request,
     file: UploadFile = File(..., description="Imagem para classificar"),
     user: AuthUser = Depends(get_current_user)
 ):
@@ -989,8 +1013,10 @@ def obter_produto(
         )
 
 
+@limiter.limit("5/minute")
 @app.post("/remove-background")
 def remover_fundo_apenas(
+    request: Request,
     file: UploadFile = File(..., description="Imagem para remover fundo"),
     user: AuthUser = Depends(get_current_user)
 ):
@@ -1075,9 +1101,421 @@ def public_ping():
     return {
         "status": "pong",
         "service": "Frida Orchestrator",
-        "version": "0.5.0",
+        "version": APP_VERSION,
         "auth_required": settings.AUTH_ENABLED
     }
+
+
+# =============================================================================
+# TECHNICAL SHEETS ENDPOINTS (PRD-05)
+# =============================================================================
+
+# --- Pydantic Models ---
+
+class SheetDataInput(BaseModel):
+    """Dados da ficha técnica."""
+    dimensions: Optional[Dict[str, Any]] = None  # altura, largura, profundidade
+    materials: Optional[Dict[str, Any]] = None  # couro, forro, metal
+    colors: Optional[List[str]] = None
+    weight_grams: Optional[int] = None
+    supplier: Optional[Dict[str, Any]] = None
+    care_instructions: Optional[str] = None
+    custom_fields: Optional[Dict[str, Any]] = None
+    
+    class Config:
+        extra = "allow"  # Permite campos adicionais
+
+
+class SheetCreateRequest(BaseModel):
+    """Request para criar ficha técnica."""
+    data: Optional[SheetDataInput] = None
+
+
+class SheetUpdateRequest(BaseModel):
+    """Request para atualizar ficha técnica."""
+    data: SheetDataInput
+    change_summary: Optional[str] = None
+
+
+class SheetStatusUpdateRequest(BaseModel):
+    """Request para atualizar status."""
+    status: str
+    rejection_comment: Optional[str] = None
+
+
+class SheetResponse(BaseModel):
+    """Response de ficha técnica."""
+    sheet_id: str
+    product_id: str
+    version: int
+    data: Dict[str, Any]
+    status: str
+    created_by: str
+    created_at: str
+    updated_at: str
+    approved_by: Optional[str] = None
+    approved_at: Optional[str] = None
+    rejection_comment: Optional[str] = None
+
+
+class SheetVersionResponse(BaseModel):
+    """Response de versão."""
+    version: int
+    data: Dict[str, Any]
+    changed_by: str
+    changed_at: str
+    change_summary: Optional[str] = None
+
+
+class SheetVersionsListResponse(BaseModel):
+    """Response de lista de versões."""
+    sheet_id: str
+    current_version: int
+    versions: List[SheetVersionResponse]
+    total: int
+
+
+# --- Endpoints ---
+
+@app.post("/products/{product_id}/sheet", response_model=SheetResponse)
+def create_or_get_sheet(
+    product_id: str,
+    request: SheetCreateRequest = None,
+    user: AuthUser = Depends(get_current_user)
+):
+    """
+    Cria ficha técnica para produto ou retorna existente.
+    
+    - Se já existe ficha, retorna a existente
+    - Se não existe, cria nova com status 'draft'
+    """
+    # Verificar se ficha já existe
+    existing = get_sheet_by_product(product_id)
+    if existing:
+        return SheetResponse(
+            sheet_id=existing["id"],
+            product_id=existing["product_id"],
+            version=existing["version"],
+            data=existing["data"],
+            status=existing["status"],
+            created_by=existing["created_by"],
+            created_at=str(existing["created_at"]),
+            updated_at=str(existing["updated_at"]),
+            approved_by=existing.get("approved_by"),
+            approved_at=str(existing["approved_at"]) if existing.get("approved_at") else None,
+            rejection_comment=existing.get("rejection_comment")
+        )
+    
+    # Preparar dados iniciais
+    initial_data = None
+    if request and request.data:
+        initial_data = request.data.dict(exclude_none=True)
+        initial_data["_version"] = 1
+        initial_data["_schema"] = "bag_v1"
+    
+    # Criar nova ficha
+    sheet_id = create_technical_sheet(product_id, user.user_id, initial_data)
+    if not sheet_id:
+        raise HTTPException(status_code=500, detail="Falha ao criar ficha técnica")
+    
+    # Buscar ficha criada
+    sheet = get_technical_sheet(sheet_id)
+    if not sheet:
+        raise HTTPException(status_code=500, detail="Ficha criada mas não encontrada")
+    
+    return SheetResponse(
+        sheet_id=sheet["id"],
+        product_id=sheet["product_id"],
+        version=sheet["version"],
+        data=sheet["data"],
+        status=sheet["status"],
+        created_by=sheet["created_by"],
+        created_at=str(sheet["created_at"]),
+        updated_at=str(sheet["updated_at"]),
+        approved_by=sheet.get("approved_by"),
+        approved_at=str(sheet["approved_at"]) if sheet.get("approved_at") else None,
+        rejection_comment=sheet.get("rejection_comment")
+    )
+
+
+@app.get("/products/{product_id}/sheet", response_model=SheetResponse)
+def get_product_sheet(
+    product_id: str,
+    user: AuthUser = Depends(get_current_user)
+):
+    """Retorna ficha técnica do produto."""
+    sheet = get_sheet_by_product(product_id)
+    if not sheet:
+        raise HTTPException(status_code=404, detail="Ficha técnica não encontrada")
+    
+    return SheetResponse(
+        sheet_id=sheet["id"],
+        product_id=sheet["product_id"],
+        version=sheet["version"],
+        data=sheet["data"],
+        status=sheet["status"],
+        created_by=sheet["created_by"],
+        created_at=str(sheet["created_at"]),
+        updated_at=str(sheet["updated_at"]),
+        approved_by=sheet.get("approved_by"),
+        approved_at=str(sheet["approved_at"]) if sheet.get("approved_at") else None,
+        rejection_comment=sheet.get("rejection_comment")
+    )
+
+
+@app.put("/products/{product_id}/sheet", response_model=SheetResponse)
+def update_product_sheet(
+    product_id: str,
+    request: SheetUpdateRequest,
+    user: AuthUser = Depends(get_current_user)
+):
+    """Atualiza dados da ficha técnica (incrementa versão automaticamente)."""
+    sheet = get_sheet_by_product(product_id)
+    if not sheet:
+        raise HTTPException(status_code=404, detail="Ficha técnica não encontrada")
+    
+    # Preparar dados para atualização
+    new_data = request.data.dict(exclude_none=True)
+    
+    # Atualizar
+    success = update_technical_sheet(
+        sheet["id"],
+        new_data,
+        user.user_id,
+        request.change_summary
+    )
+    
+    if not success:
+        raise HTTPException(status_code=500, detail="Falha ao atualizar ficha")
+    
+    # Buscar atualizada
+    updated = get_technical_sheet(sheet["id"])
+    if not updated:
+        raise HTTPException(status_code=500, detail="Ficha atualizada mas não encontrada")
+    
+    return SheetResponse(
+        sheet_id=updated["id"],
+        product_id=updated["product_id"],
+        version=updated["version"],
+        data=updated["data"],
+        status=updated["status"],
+        created_by=updated["created_by"],
+        created_at=str(updated["created_at"]),
+        updated_at=str(updated["updated_at"]),
+        approved_by=updated.get("approved_by"),
+        approved_at=str(updated["approved_at"]) if updated.get("approved_at") else None,
+        rejection_comment=updated.get("rejection_comment")
+    )
+
+
+@app.patch("/products/{product_id}/sheet/status", response_model=SheetResponse)
+def update_product_sheet_status(
+    product_id: str,
+    request: SheetStatusUpdateRequest,
+    user: AuthUser = Depends(get_current_user)
+):
+    """Atualiza status da ficha técnica."""
+    valid_statuses = ["draft", "pending", "approved", "rejected", "published"]
+    if request.status not in valid_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Status inválido. Válidos: {valid_statuses}"
+        )
+    
+    sheet = get_sheet_by_product(product_id)
+    if not sheet:
+        raise HTTPException(status_code=404, detail="Ficha técnica não encontrada")
+    
+    success = update_sheet_status(
+        sheet["id"],
+        request.status,
+        user.user_id,
+        request.rejection_comment
+    )
+    
+    if not success:
+        raise HTTPException(status_code=500, detail="Falha ao atualizar status")
+    
+    updated = get_technical_sheet(sheet["id"])
+    
+    return SheetResponse(
+        sheet_id=updated["id"],
+        product_id=updated["product_id"],
+        version=updated["version"],
+        data=updated["data"],
+        status=updated["status"],
+        created_by=updated["created_by"],
+        created_at=str(updated["created_at"]),
+        updated_at=str(updated["updated_at"]),
+        approved_by=updated.get("approved_by"),
+        approved_at=str(updated["approved_at"]) if updated.get("approved_at") else None,
+        rejection_comment=updated.get("rejection_comment")
+    )
+
+
+@app.get("/products/{product_id}/sheet/versions", response_model=SheetVersionsListResponse)
+def list_sheet_versions(
+    product_id: str,
+    user: AuthUser = Depends(get_current_user)
+):
+    """Lista histórico de versões da ficha."""
+    sheet = get_sheet_by_product(product_id)
+    if not sheet:
+        raise HTTPException(status_code=404, detail="Ficha técnica não encontrada")
+    
+    versions_data = get_sheet_versions(sheet["id"])
+    
+    versions = [
+        SheetVersionResponse(
+            version=v["version"],
+            data=v["data"],
+            changed_by=v["changed_by"],
+            changed_at=str(v["changed_at"]),
+            change_summary=v.get("change_summary")
+        )
+        for v in versions_data
+    ]
+    
+    return SheetVersionsListResponse(
+        sheet_id=sheet["id"],
+        current_version=sheet["version"],
+        versions=versions,
+        total=len(versions)
+    )
+
+
+@app.get("/products/{product_id}/sheet/versions/{version}", response_model=SheetVersionResponse)
+def get_sheet_version_endpoint(
+    product_id: str,
+    version: int,
+    user: AuthUser = Depends(get_current_user)
+):
+    """Retorna versão específica da ficha."""
+    sheet = get_sheet_by_product(product_id)
+    if not sheet:
+        raise HTTPException(status_code=404, detail="Ficha técnica não encontrada")
+    
+    version_data = get_sheet_version(sheet["id"], version)
+    if not version_data:
+        raise HTTPException(status_code=404, detail=f"Versão {version} não encontrada")
+    
+    return SheetVersionResponse(
+        version=version_data["version"],
+        data=version_data["data"],
+        changed_by=version_data["changed_by"],
+        changed_at=str(version_data["changed_at"]),
+        change_summary=version_data.get("change_summary")
+    )
+
+
+@app.delete("/products/{product_id}/sheet")
+def delete_product_sheet(
+    product_id: str,
+    user: AuthUser = Depends(get_current_user)
+):
+    """
+    Deleta ficha técnica.
+    
+    Só permite deletar se status = 'draft'.
+    """
+    sheet = get_sheet_by_product(product_id)
+    if not sheet:
+        raise HTTPException(status_code=404, detail="Ficha técnica não encontrada")
+    
+    if sheet["status"] != "draft":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Só é possível deletar fichas com status 'draft'. Status atual: {sheet['status']}"
+        )
+    
+    success = delete_technical_sheet(sheet["id"])
+    if not success:
+        raise HTTPException(status_code=500, detail="Falha ao deletar ficha")
+    
+    return {
+        "message": "Ficha técnica deletada com sucesso",
+        "sheet_id": sheet["id"],
+        "product_id": product_id
+    }
+
+
+@app.get("/products/{product_id}/sheet/export/pdf")
+def export_sheet_pdf(
+    product_id: str,
+    user: AuthUser = Depends(get_current_user)
+):
+    """
+    Exporta ficha técnica como PDF.
+    
+    Gera documento PDF formatado com todas as informações da ficha.
+    """
+    # Buscar ficha do produto
+    sheet = get_sheet_by_product(product_id)
+    if not sheet:
+        raise HTTPException(status_code=404, detail="Ficha técnica não encontrada")
+    
+    # Buscar dados do produto
+    try:
+        client = get_supabase_client()
+        product_response = client.table("products")\
+            .select("*")\
+            .eq("id", product_id)\
+            .single()\
+            .execute()
+        
+        if not product_response.data:
+            raise HTTPException(status_code=404, detail="Produto não encontrado")
+        
+        product = product_response.data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao buscar produto: {str(e)}")
+    
+    # Buscar URL da imagem processada (se existir)
+    processed_url = None
+    try:
+        images_response = client.table("images")\
+            .select("*")\
+            .eq("product_id", product_id)\
+            .eq("type", "processed")\
+            .execute()
+        
+        if images_response.data and len(images_response.data) > 0:
+            image = images_response.data[0]
+            bucket = image.get("storage_bucket", "processed-images")
+            path = image.get("storage_path", "")
+            if path:
+                processed_url = client.storage.from_(bucket).get_public_url(path)
+    except Exception as e:
+        print(f"[PDF] ⚠ Não foi possível obter imagem: {str(e)}")
+        # Continua sem imagem
+    
+    # Preparar dados para o PDF
+    sheet_data = sheet.get("data", {})
+    sheet_data["status"] = sheet.get("status", "draft")
+    sheet_data["_version"] = sheet.get("version", 1)
+    
+    # Gerar PDF
+    try:
+        pdf_buffer = pdf_generator.generate(
+            sheet_data=sheet_data,
+            product_data=product,
+            processed_image_url=processed_url
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao gerar PDF: {str(e)}")
+    
+    # Montar nome do arquivo
+    category = product.get("category", "produto").replace(" ", "_")
+    version = sheet.get("version", 1)
+    filename = f"ficha_tecnica_{category}_v{version}.pdf"
+    
+    return StreamingResponse(
+        pdf_buffer,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}"
+        }
+    )
 
 
 # =============================================================================

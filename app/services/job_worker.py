@@ -27,6 +27,13 @@ from io import BytesIO
 from PIL import Image
 from rembg import remove
 
+# requests é opcional (apenas para remove.bg fallback)
+try:
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
+
 from app.config import settings
 from app.database import (
     get_job,
@@ -298,24 +305,25 @@ class JobWorker:
     def _segment_removebg(self, image_bytes: bytes) -> bytes:
         """
         Segmentação via remove.bg API.
-        Requer REMOVEBG_API_KEY no .env
+        Requer REMOVEBG_API_KEY no .env e biblioteca requests instalada.
         """
+        if not REQUESTS_AVAILABLE:
+            raise ValueError("Biblioteca 'requests' não instalada. Execute: pip install requests")
+
         api_key = getattr(settings, 'REMOVEBG_API_KEY', None)
         if not api_key:
             raise ValueError("REMOVEBG_API_KEY não configurada")
-        
-        import requests
-        
+
         response = requests.post(
             "https://api.remove.bg/v1.0/removebg",
             files={"image_file": image_bytes},
             data={"size": "auto"},
             headers={"X-Api-Key": api_key}
         )
-        
+
         if response.status_code != 200:
             raise Exception(f"remove.bg error: {response.status_code} - {response.text}")
-        
+
         return response.content
     
     def _download_from_storage(self, bucket: str, path: str) -> bytes:

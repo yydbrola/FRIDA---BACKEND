@@ -113,6 +113,9 @@ class Settings:
     MAX_FILE_SIZE_MB: int = 10  # Tamanho máximo do arquivo em MB
     MAX_FILE_SIZE_BYTES: int = MAX_FILE_SIZE_MB * 1024 * 1024  # 10MB em bytes
     MAX_IMAGE_DIMENSION: int = 8000  # Dimensão máxima (largura ou altura) em pixels
+
+    # Segmentação - Fallback Provider (opcional)
+    REMOVEBG_API_KEY: str = os.getenv("REMOVEBG_API_KEY", "")  # API key para remove.bg (fallback)
     
     @classmethod
     def validate(cls) -> list[str]:

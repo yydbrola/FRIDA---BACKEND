@@ -10,6 +10,8 @@ Este documento registra o processo de implementação, testes e resultados das f
 
 - [Micro-PRD 03: Image Pipeline](#micro-prd-03-image-pipeline)
 - [Bug Fixes v0.5.3](#bug-fixes-v053)
+- [Micro-PRD 04: Jobs Async](#micro-prd-04-jobs-async)
+- [Bug Fixes v0.5.4](#bug-fixes-v054)
 
 ---
 
@@ -540,3 +542,623 @@ Testes adicionados:
 
 *Documentado por: Claude (Anthropic)*  
 *Data: 2026-01-13 19:26 BRT*
+
+---
+
+# Micro-PRD 04: Jobs Async
+
+**Data:** 2026-01-14  
+**Duração:** ~60 minutos  
+**Status:** ✅ COMPLETO
+
+## Objetivo
+
+Implementar processamento assíncrono de imagens com:
+- Endpoint que retorna imediatamente (< 2s) com job_id
+- Worker em background para processar fila
+- Endpoints de polling para acompanhar progresso
+- Retry com exponential backoff
+- Fallback de providers
+
+---
+
+## Passo a Passo da Implementação
+
+### Prompt 1: SQL Schema para Jobs
+
+**Arquivo criado:** `SQL para o SUPABASE/07_create_jobs_table.sql`
+
+**Funcionalidade:**
+- Tabela `jobs` com state machine completa
+- Campos para retry e fallback
+- Índices para performance
+- RLS policies dual-mode (dev + prod)
+
+**Estado do Job (State Machine):**
+```
+queued → processing → completed
+              ↓
+           failed
+```
+
+**Campos principais:**
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| `id` | UUID | PK |
+| `product_id` | UUID | FK → products |
+| `status` | TEXT | queued/processing/completed/failed |
+| `current_step` | TEXT | Etapa atual do pipeline |
+| `progress` | INTEGER | 0-100 |
+| `attempts` | INTEGER | Tentativas realizadas |
+| `max_attempts` | INTEGER | Máximo de tentativas (default 3) |
+| `provider` | TEXT | Provider usado (rembg/remove.bg) |
+| `input_data` | JSONB | Dados de entrada |
+| `output_data` | JSONB | Dados de saída |
+| `last_error` | TEXT | Último erro |
+| `next_retry_at` | TIMESTAMP | Próxima tentativa |
+
+**Execução no Supabase:** ✅ Tabela e policies criadas
+
+---
+
+### Prompt 2: CRUD Functions para Jobs
+
+**Arquivo modificado:** `app/database.py`
+
+**Funções adicionadas (9 total):**
+
+| Função | Descrição |
+|--------|-----------|
+| `create_job()` | Cria job com status='queued' |
+| `get_job()` | Busca job por ID |
+| `get_user_jobs()` | Lista jobs do usuário |
+| `get_next_queued_job()` | Próximo job na fila (FIFO) |
+| `update_job_progress()` | Atualiza status/step/progress |
+| `increment_job_attempt()` | Incrementa tentativas + registra erro |
+| `complete_job()` | Marca como completed + salva output |
+| `fail_job()` | Marca como failed (definitivo) |
+| `get_pending_retry_jobs()` | Jobs prontos para retry |
+
+**Padrão seguido:**
+```python
+def create_job(product_id: str, user_id: str, input_data: dict) -> Optional[str]:
+    """
+    Cria novo job com status='queued'.
+    
+    Returns:
+        job_id se sucesso, None se falha
+    """
+    # ... implementação
+```
+
+**Teste de importação:** ✅ Todas as funções disponíveis
+
+---
+
+### Prompt 3: Endpoint POST /process-async
+
+**Arquivo modificado:** `app/main.py`
+
+**Response Model criado:**
+```python
+class ProcessAsyncResponse(BaseModel):
+    status: str           # "processing"
+    job_id: str           # UUID do job
+    product_id: str       # UUID do produto
+    classification: dict  # Resultado da classificação
+    message: str          # Instrução para polling
+```
+
+**Fluxo do endpoint:**
+```
+POST /process-async
+│
+├─ Etapa 1: Validar arquivo (3 camadas)
+├─ Etapa 2: Classificar com Gemini (~1s)
+├─ Etapa 3: Criar produto no banco
+├─ Etapa 4: Upload original → bucket 'raw'
+├─ Etapa 5: Registrar imagem na tabela images
+└─ Etapa 6: Criar job na fila
+    │
+    └─► Return { status: "processing", job_id, product_id }
+         (< 2 segundos)
+```
+
+**Teste:** ✅ Retorna em < 2s
+
+---
+
+### Prompt 4: Endpoints GET /jobs/{id} e GET /jobs
+
+**Arquivo modificado:** `app/main.py`
+
+**Response Models criados:**
+
+```python
+class JobStatusResponse(BaseModel):
+    job_id: str
+    product_id: str
+    status: str  # queued/processing/completed/failed
+    current_step: Optional[str]
+    progress: int
+    attempts: int
+    max_attempts: int
+    # Campos condicionais
+    images: Optional[Dict]       # quando completed
+    quality_score: Optional[int] # quando completed
+    last_error: Optional[str]    # quando failed
+    can_retry: bool              # se attempts < max_attempts
+
+class JobListItem(BaseModel):
+    job_id: str
+    product_id: str
+    status: str
+    progress: int
+    current_step: Optional[str]
+    created_at: str
+
+class JobListResponse(BaseModel):
+    jobs: List[JobListItem]
+    total: int
+```
+
+**Endpoints:**
+- `GET /jobs/{job_id}` - Status detalhado de um job
+- `GET /jobs` - Lista jobs do usuário (limit 20, max 100)
+
+**Teste:** ✅ Retornando dados corretos
+
+---
+
+### Prompt 5: Job Worker Service
+
+**Arquivo criado:** `app/services/job_worker.py` (~400 linhas)
+
+**Classes implementadas:**
+
+#### JobWorker
+Processa jobs individualmente.
+
+**Pipeline do Worker:**
+```
+process_job(job_id)
+│
+├─ 1. Download original (raw bucket)
+├─ 2. Segmentação (rembg com fallback)
+├─ 3. Composição (ImageComposer)
+├─ 4. Validação (HuskLayer)
+├─ 5. Upload (segmented + processed)
+├─ 6. Register (images table)
+└─ 7. Complete job
+```
+
+**Configuração de progresso:**
+```python
+STEPS = {
+    "downloading": (0, 20),
+    "segmenting": (20, 50),
+    "composing": (50, 75),
+    "validating": (75, 85),
+    "saving": (85, 95),
+    "done": (95, 100)
+}
+```
+
+**Retry configuration:**
+```python
+RETRY_DELAYS = [2, 4, 8]  # exponential backoff
+MAX_ATTEMPTS = 3
+```
+
+#### JobWorkerDaemon
+Loop em background que processa fila.
+
+**Métodos:**
+- `start()` - Inicia thread daemon
+- `stop()` - Para gracefully
+- `get_stats()` - Estatísticas
+
+**Polling interval:** 2 segundos
+
+---
+
+### Prompt 6: Integração Startup/Shutdown
+
+**Arquivo modificado:** `app/main.py`
+
+**Mudanças:**
+```python
+from app.services.job_worker import job_daemon
+
+@app.on_event("startup")
+async def startup_event():
+    # ... serviços existentes ...
+    job_daemon.start()
+    print("[STARTUP] ✓ JobWorkerDaemon iniciado")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    job_daemon.stop()
+    print("[SHUTDOWN] ✓ JobWorkerDaemon parado")
+```
+
+**Teste de startup:**
+```
+[STARTUP] ✓ JobWorkerDaemon iniciado (processamento async)
+[DAEMON] Loop iniciado, aguardando jobs...
+```
+
+---
+
+### Prompt 7: Script de Testes PRD-04
+
+**Arquivo criado:** `scripts/test_prd04_jobs.py`
+
+**Modos de teste:**
+```bash
+python scripts/test_prd04_jobs.py --test-db     # CRUD
+python scripts/test_prd04_jobs.py --test-worker # Worker isolado
+python scripts/test_prd04_jobs.py --test-api    # E2E
+python scripts/test_prd04_jobs.py --all         # Todos
+```
+
+**Testes incluídos:**
+| Categoria | Testes | Status |
+|-----------|--------|--------|
+| Database CRUD | 8 | ✅ 100% |
+| Worker Isolado | 5 | ✅ 100% |
+| API Endpoints | 3 | ✅ 100% |
+
+---
+
+## Bug Fix Durante Testes
+
+### Issue: QualityReport AttributeError
+
+**Problema:**
+```
+'QualityReport' object has no attribute 'resolution_score'
+```
+
+**Causa:** O dataclass `QualityReport` usa `details` dict, não atributos individuais.
+
+**Correção aplicada:**
+```python
+# ANTES (errado)
+"quality_details": {
+    "resolution_score": quality_report.resolution_score,
+    "centering_score": quality_report.centering_score,
+    "background_score": quality_report.background_score
+}
+
+# DEPOIS (correto)
+"quality_details": quality_report.details
+```
+
+**Status:** ✅ CORRIGIDO
+
+---
+
+## Testes Realizados
+
+### Teste 1: Database CRUD
+
+```bash
+python scripts/test_prd04_jobs.py --test-db
+```
+
+**Resultado:**
+```
+✓ create_job() retornou job_id
+✓ get_job() retornou job com status='queued'
+✓ update_job_progress() atualizou corretamente
+✓ increment_job_attempt() incrementou para 1
+✓ complete_job() marcou como completed
+✓ fail_job() marcou como failed
+✓ get_user_jobs() retornou 5 jobs
+✓ get_next_queued_job() retornou job
+
+Testes passaram: 8/8 (100%)
+```
+
+---
+
+### Teste 2: Worker Isolado
+
+```bash
+python scripts/test_prd04_jobs.py --test-worker
+```
+
+**Resultado:**
+```
+✓ JobWorker e JobWorkerDaemon importados
+✓ JobWorker instanciado
+✓ Serviços internos (composer, husk) OK
+✓ JobWorkerDaemon configurável OK
+✓ Instâncias globais (job_worker, job_daemon) OK
+
+Testes passaram: 5/5 (100%)
+```
+
+---
+
+### Teste 3: API E2E (End-to-End)
+
+```bash
+python scripts/test_prd04_jobs.py --test-api
+```
+
+**Resultado:**
+```
+✓ Servidor rodando em http://localhost:8000
+✓ POST /process-async retornou job_id: 096b9a1b...
+    product_id: 9c48705e...
+    status: processing
+ℹ Aguardando processamento (max 120s)...
+    [████████████████████] 100% | done | status=completed
+✓ Job completou com sucesso!
+    quality_score: 100
+    quality_passed: True
+    images: ['original', 'processed', 'segmented']
+✓ GET /jobs retornou 9 jobs
+
+Testes passaram: 3/3 (100%)
+```
+
+---
+
+### Teste 4: Curl Manual
+
+```bash
+curl -s -X POST http://localhost:8000/process-async \
+  -F "file=@test_images/bolsa_teste.png"
+```
+
+**Resultado:**
+```json
+{
+  "status": "processing",
+  "job_id": "4eca785b-09bf-43c4-99e4-d29f6ba4dc79",
+  "product_id": "dee7427e-80f2-4473-8334-613d2d92d4b0",
+  "classification": {
+    "item": "bolsa",
+    "estilo": "sketch",
+    "confianca": 0.95
+  },
+  "message": "Processamento iniciado. Use GET /jobs/{job_id} para acompanhar o progresso."
+}
+```
+
+---
+
+## Arquivos Criados/Modificados
+
+| Arquivo | Tipo | Linhas |
+|---------|------|--------|
+| `SQL para o SUPABASE/07_create_jobs_table.sql` | NOVO | ~310 |
+| `app/database.py` | MODIFICADO | +170 (9 funções) |
+| `app/main.py` | MODIFICADO | +300 (endpoints + models) |
+| `app/services/job_worker.py` | NOVO | ~400 |
+| `scripts/test_prd04_jobs.py` | NOVO | ~400 |
+
+**Total:** ~1.500 linhas de código novo
+
+---
+
+## Comentários do Antigravity
+
+### Pontos Positivos
+
+1. **Resposta Imediata** - `/process-async` retorna em < 2s, cumprindo o objetivo de UX.
+
+2. **State Machine Robusta** - Jobs têm estados claros (queued → processing → completed/failed) com retry automático.
+
+3. **Exponential Backoff** - Delays de 2s, 4s, 8s entre retries evitam sobrecarga.
+
+4. **Polling Eficiente** - Frontend pode acompanhar progresso em tempo real (0% → 100%).
+
+5. **Fallback Preparado** - Estrutura pronta para adicionar remove.bg como fallback do rembg.
+
+6. **Daemon Graceful** - Start/stop integrado ao lifecycle do FastAPI.
+
+### Pontos de Atenção
+
+1. **Client Creation Spam** - Logs mostram criação excessiva de clients Supabase no polling. Considerar cache com TTL.
+
+2. **Sem Rate Limiting** - Ainda não implementado. Vulnerável a API abuse.
+
+3. **Thread vs Async** - Daemon usa threading, não asyncio. Funciona, mas não é a abordagem mais "Pythonic" para FastAPI.
+
+4. **Cleanup de Jobs** - Jobs antigos não são limpos automaticamente. Considerar job de manutenção.
+
+### Recomendações Futuras
+
+1. **Connection Pooling** - Reduzir criação de clients Supabase.
+
+2. **Rate Limiting** - Implementar com slowapi.
+
+3. **Job Cleanup** - Cronjob para deletar jobs > 30 dias.
+
+4. **Webhook Notifications** - Notificar frontend quando job completa (ao invés de polling).
+
+5. **Metrics** - Adicionar métricas de tempo de processamento por etapa.
+
+---
+
+## Status Final
+
+| Aspecto | Status |
+|---------|--------|
+| SQL Schema | ✅ Implementado |
+| CRUD Functions | ✅ 9 funções |
+| POST /process-async | ✅ < 2s |
+| GET /jobs/{id} | ✅ Polling |
+| GET /jobs | ✅ Listagem |
+| JobWorker | ✅ Pipeline completo |
+| JobWorkerDaemon | ✅ Background |
+| Testes | ✅ 16/16 (100%) |
+| Bug Fix | ✅ QualityReport |
+
+**Micro-PRD 04:** ✅ **COMPLETO**
+
+---
+
+# Bug Fixes v0.5.4
+
+**Data:** 2026-01-14  
+**Revisor Original:** Claude Opus 4.5 (Context7)  
+**Implementado por:** Antigravity (Google DeepMind)
+
+## Contexto
+
+Após implementação do PRD-04, a revisão de código identificou dois pontos de melhoria relacionados ao uso de APIs depreciadas do FastAPI e ao graceful shutdown do daemon.
+
+---
+
+## Correção 1: Migração para Lifespan Context Manager
+
+**Severidade:** Alta  
+**Arquivo:** `app/main.py`
+
+### Problema
+
+Os decorators `@app.on_event("startup")` e `@app.on_event("shutdown")` estão **depreciados** no FastAPI moderno. A documentação oficial recomenda usar o `lifespan` async context manager.
+
+### Solução Aplicada
+
+```python
+# ANTES (depreciado)
+@app.on_event("startup")
+async def startup_event():
+    # inicialização
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    # cleanup
+
+# DEPOIS (moderno)
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # === STARTUP ===
+    # inicialização
+    
+    yield  # Aplicação rodando
+    
+    # === SHUTDOWN ===
+    # cleanup
+
+# Atribuir ao app
+app.router.lifespan_context = lifespan
+```
+
+### Mudanças
+- Adicionado `from contextlib import asynccontextmanager`
+- Função `lifespan()` substitui ambos os decorators
+- Versão exibida no startup agora usa `APP_VERSION` (dinâmico)
+- Atribuição via `app.router.lifespan_context = lifespan`
+
+**Status:** ✅ CORRIGIDO
+
+---
+
+## Correção 2: Graceful Shutdown do Daemon
+
+**Severidade:** Média  
+**Arquivo:** `app/services/job_worker.py`
+
+### Problema
+
+O `JobWorkerDaemon` usava `threading.Thread(daemon=True)` que termina abruptamente quando o processo principal encerra. O `time.sleep()` não era interruptível, causando delays desnecessários no shutdown.
+
+### Solução Aplicada
+
+```python
+# ANTES
+def __init__(self):
+    self.running = False
+    self.thread = None
+
+def start(self):
+    self.thread = threading.Thread(daemon=True, ...)  # Termina abruptamente
+
+def stop(self):
+    self.running = False
+    self.thread.join(timeout=10)  # Espera sem interromper
+
+def _run_loop(self):
+    time.sleep(self.poll_interval)  # Não interruptível
+
+# DEPOIS
+def __init__(self):
+    self._stop_event = threading.Event()  # Evento para interrupção
+    self._current_job_id = None  # Rastreia job atual
+
+def start(self):
+    self._stop_event.clear()
+    self.thread = threading.Thread(daemon=False, ...)  # Permite graceful
+
+def stop(self, timeout=30):
+    self._stop_event.set()  # Sinaliza stop
+    self.thread.join(timeout=timeout)  # Aguarda job atual
+
+def _run_loop(self):
+    self._stop_event.wait(timeout=self.poll_interval)  # Interruptível!
+```
+
+### Mudanças
+- `threading.Thread(daemon=False)` permite shutdown graceful
+- `threading.Event()` para sinalização interruptível
+- `_stop_event.wait(timeout=...)` substitui `time.sleep()`
+- `_current_job_id` rastreia job em processamento
+- Timeout aumentado para 30s (aguarda job atual)
+
+**Status:** ✅ CORRIGIDO
+
+---
+
+## Arquivos Modificados
+
+| Arquivo | Mudança | Linhas |
+|---------|---------|--------|
+| `app/main.py` | Lifespan migration | +import, ~150 linhas refatoradas |
+| `app/services/job_worker.py` | Graceful shutdown | ~30 linhas alteradas |
+
+---
+
+## Teste de Verificação
+
+```bash
+python -c "
+from app.main import app, lifespan
+from app.services.job_worker import job_daemon
+
+print(f'lifespan_context: {app.router.lifespan_context}')
+print(f'_stop_event: {hasattr(job_daemon, \"_stop_event\")}')
+print(f'_current_job_id: {hasattr(job_daemon, \"_current_job_id\")}')
+"
+```
+
+**Resultado:**
+```
+lifespan_context: <function lifespan at 0x7f0cc3019440>
+_stop_event: True
+_current_job_id: True
+```
+
+---
+
+## Status Final
+
+| Correção | Status |
+|----------|--------|
+| Lifespan migration | ✅ CORRIGIDO |
+| Graceful shutdown | ✅ CORRIGIDO |
+
+**Versão atual:** 0.5.4
+
+---
+
+*Documentado por: Antigravity (Google DeepMind)*  
+*Data: 2026-01-14 01:45 BRT*

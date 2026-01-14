@@ -8,9 +8,11 @@ This file contains comprehensive test documentation for the Frida Orchestrator p
 
 | Suite | Tests | Status | Script |
 |-------|-------|--------|--------|
-| Core API (FASE_DE_TESTES) | 16/25 | 64% | Manual curl commands |
+| Core API (PRD 0-3) | 26/29 | 90% | `testes_PRD_0_a_3.md` |
 | Micro-PRD 03 | 61/61 | 100% | `scripts/test_prd03_complete.py` |
 | Pipeline Validation | 4/4 | 100% | `scripts/test_pipeline.py` |
+| PRD 04-05 (Jobs/Sheets) | 19/20 | 95% | `scripts/test_prd_04_05.sh` |
+| E2E Flow | 7/7 | 100% | `scripts/test_e2e_complete.sh` |
 
 ---
 
@@ -38,6 +40,12 @@ python scripts/test_prd03_complete.py --edge
 # Run only integration tests
 python scripts/test_prd03_complete.py --integration
 
+# PRD 04/05 Automated Tests (Jobs & Sheets)
+./scripts/test_prd_04_05.sh
+
+# E2E Complete Flow Test
+./scripts/test_e2e_complete.sh
+
 # Run error cases (original script)
 python scripts/test_pipeline.py --errors
 
@@ -51,7 +59,11 @@ python scripts/test_pipeline.py test_images/bolsa_teste.png
 
 | File | Description |
 |------|-------------|
+| `testes_PRD_0_a_3.md` | Core API tests (Categories 1-8) |
+| `testes_PRD_4_e_5.md` | Jobs Async + Tech Sheets tests (Categories 9-11) |
 | `scripts/test_prd03_complete.py` | Complete PRD 03 test suite (61 tests) |
+| `scripts/test_prd_04_05.sh` | Automated PRD 04/05 tests (bash) |
+| `scripts/test_e2e_complete.sh` | Full E2E flow test (bash) |
 | `scripts/test_pipeline.py` | Local pipeline testing |
 | `test_images/bolsa_teste.png` | Test input image (800x600px) |
 | `test_images/bolsa_teste_segmented.png` | Segmented output |
@@ -59,9 +71,9 @@ python scripts/test_pipeline.py test_images/bolsa_teste.png
 
 ---
 
-## Core API Tests (FASE_DE_TESTES.md)
+## Core API Tests (testes_PRD_0_a_3.md)
 
-**Overall Progress:** 16/25 tests (64% complete)
+**Overall Progress:** 26/29 tests (90% complete)
 
 ### Completed Test Categories
 
@@ -263,18 +275,22 @@ Empty bytes: Exception caught (UnidentifiedImageError)
 ## Known Test Gaps
 
 ### High Priority
-1. **Storage Tests (Category 6):** Requires Supabase configuration
-2. **Rate Limiting Tests:** Not implemented (rate limiting not implemented)
-3. **TechSheetService Tests:** No unit or integration tests
+1. **Rate Limiting Tests:** Not implemented (rate limiting not implemented)
+2. **Manual Supabase Dashboard Verification:** Some storage tests pending visual confirmation
 
 ### Medium Priority
-4. **File Size Limits:** Edge cases for >10MB files
-5. **Concurrent Requests:** Load testing not performed
-6. **Invalid Content-Type:** Security edge cases
+3. **Startup Without GEMINI_API_KEY:** Not tested to avoid server disruption
+4. **Concurrent Requests:** Basic load testing done (5 parallel), advanced pending
 
 ### Low Priority
-7. **Model Caching:** rembg U2NET model download behavior
-8. **Image Generation:** GEMINI_MODEL_IMAGE_GEN not tested (experimental)
+5. **Model Caching:** rembg U2NET model download behavior
+6. **Image Generation:** GEMINI_MODEL_IMAGE_GEN not tested (experimental)
+
+### Resolved (v0.5.4)
+- ~~Storage Tests (Category 6)~~ - Verified with Supabase configured
+- ~~TechSheetService Tests~~ - Full integration tests in PRD 4-5 (95% passing)
+- ~~File Size Limits~~ - DoS Protection implemented (10MB, 8000px limits)
+- ~~Invalid Content-Type~~ - Tested with HTTP 422 validation
 
 ---
 
@@ -303,5 +319,8 @@ jobs:
 
 ---
 
-**Last Updated:** 2026-01-13
-**See Also:** FASE_DE_TESTES.md for detailed test protocols
+**Last Updated:** 2026-01-14
+**Version:** 0.5.4
+**See Also:**
+- `testes_PRD_0_a_3.md` - Core API test protocols (Categories 1-8, 90% passing)
+- `testes_PRD_4_e_5.md` - Jobs Async & Tech Sheets test protocols (Categories 9-11, 95% passing)

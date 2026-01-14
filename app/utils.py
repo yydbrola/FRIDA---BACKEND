@@ -239,14 +239,21 @@ def validate_image_deep(file_bytes: bytes, content_type: Optional[str] = None) -
     
     # 2. Tenta abrir com Pillow para validar integridade
     try:
-        image = Image.open(io.BytesIO(file_bytes))
+        # Primeira abertura para verify()
+        with io.BytesIO(file_bytes) as buffer1:
+            image1 = Image.open(buffer1)
+            try:
+                image1.verify()
+            finally:
+                image1.close()
         
-        # Força leitura completa para detectar arquivos corrompidos
-        image.verify()
-        
-        # Reabre para obter formato (verify() invalida o objeto)
-        image = Image.open(io.BytesIO(file_bytes))
-        pil_format = image.format
+        # Segunda abertura para obter formato (verify() invalida o objeto)
+        with io.BytesIO(file_bytes) as buffer2:
+            image2 = Image.open(buffer2)
+            try:
+                pil_format = image2.format
+            finally:
+                image2.close()
         
     except Exception as e:
         return False, f"Arquivo corrompido ou não é uma imagem válida: {str(e)}"

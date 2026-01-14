@@ -132,8 +132,12 @@ class HuskLayer:
         Returns:
             QualityReport com resultado da validação
         """
-        image = Image.open(BytesIO(image_bytes))
-        return self.calculate_quality_score(image)
+        with BytesIO(image_bytes) as buffer:
+            image = Image.open(buffer)
+            try:
+                return self.calculate_quality_score(image)
+            finally:
+                image.close()
     
     # ==========================================================================
     # Métodos Privados - Checks

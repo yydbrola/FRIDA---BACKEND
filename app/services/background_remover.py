@@ -25,6 +25,9 @@ class BackgroundRemoverService:
         """
         Remove o fundo de uma imagem.
         
+        IMPORTANTE: O caller é responsável por fechar a imagem retornada
+        com image.close() após o uso para evitar memory leak.
+        
         Args:
             image_bytes: Bytes da imagem original
             

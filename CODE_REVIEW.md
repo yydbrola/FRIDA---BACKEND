@@ -250,7 +250,50 @@ require_any = require_role("admin", "user")
 
 ---
 
-### 2.3 Issue Conhecida: Segmentacao com Modelos
+### 2.3 Issue Conhecida: Import PIL Duplicado
+
+**Severidade:** 🟢 Baixa
+**Arquivo:** `main.py`
+**Status:** Documentado, correcao adiada
+
+**Problema:** O modulo `PIL.Image` e importado dentro de funcoes em vez de usar o import existente no topo do arquivo.
+
+**Localizacoes:**
+- `main.py:467` - Dentro de `processar_produto()`
+- `main.py:554-556` - Dentro de `processar_produto()` (segundo uso)
+- `main.py:559-561` - Dentro de `processar_produto()` (terceiro uso)
+- `main.py:681` - Dentro de `processar_produto_async()`
+
+**Codigo atual:**
+```python
+# Dentro da funcao (linha ~467)
+from PIL import Image
+with io.BytesIO(content) as img_buffer:
+    with Image.open(img_buffer) as img:
+        ...
+```
+
+**Impacto:**
+- Overhead minimo de performance (import cacheado pelo Python)
+- Inconsistencia de estilo de codigo
+- Nao causa bugs funcionais
+
+**Solucao recomendada:**
+```python
+# No topo do arquivo (adicionar se nao existir)
+from PIL import Image
+
+# Dentro da funcao (remover import local)
+with io.BytesIO(content) as img_buffer:
+    with Image.open(img_buffer) as img:
+        ...
+```
+
+**Decisao:** Adiado para futura refatoracao. O codigo funciona corretamente e o impacto e apenas estetico/organizacional.
+
+---
+
+### 2.4 Issue Conhecida: Segmentacao com Modelos
 
 **Severidade:** 🟡 Media
 **Arquivo:** `background_remover.py`

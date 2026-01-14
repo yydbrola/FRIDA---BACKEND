@@ -9,7 +9,9 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List, Dict, Any
+from datetime import datetime
+from contextlib import asynccontextmanager
 
 from app.config import settings, APP_VERSION
 from app.utils import validate_image_file, validate_image_deep, generate_filename
@@ -19,13 +21,16 @@ from app.services.tech_sheet import TechSheetService
 from app.services.storage import StorageService
 from app.services.image_pipeline import image_pipeline_sync
 from app.auth import get_current_user, AuthUser
-from app.database import create_product, get_user_products, create_image, get_supabase_client
+from app.database import create_product, get_user_products, create_image, get_supabase_client, create_job, get_job, get_user_jobs
+from app.services.job_worker import job_daemon
 
 
 # =============================================================================
 # App Initialization
 # =============================================================================
 
+# FastAPI app criado sem lifespan (será configurado após definição)
+# O lifespan é definido após os Response Models
 app = FastAPI(
     title="Frida Orchestrator",
     description="Backend de processamento de imagens e IA para produtos de moda",
@@ -69,6 +74,56 @@ class ProcessResponse(BaseModel):
     quality_passed: Optional[bool] = None  # score >= 80
 
 
+class ProcessAsyncResponse(BaseModel):
+    """Resposta do endpoint de processamento assíncrono."""
+    status: str  # "processing"
+    job_id: str
+    product_id: str
+    classification: dict
+    message: str
+
+
+class JobStatusResponse(BaseModel):
+    """Response para GET /jobs/{job_id}"""
+    job_id: str
+    product_id: str
+    status: str  # queued, processing, completed, failed
+    current_step: Optional[str] = None
+    progress: int = 0
+    attempts: int = 0
+    max_attempts: int = 3
+    
+    # Timestamps
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    created_at: Optional[str] = None
+    
+    # Para status = "completed"
+    images: Optional[Dict[str, Any]] = None
+    quality_score: Optional[int] = None
+    quality_passed: Optional[bool] = None
+    
+    # Para status = "failed"
+    last_error: Optional[str] = None
+    can_retry: bool = False
+
+
+class JobListItem(BaseModel):
+    """Item resumido para listagem de jobs."""
+    job_id: str
+    product_id: str
+    status: str
+    progress: int
+    current_step: Optional[str] = None
+    created_at: str
+
+
+class JobListResponse(BaseModel):
+    """Response para GET /jobs"""
+    jobs: List[JobListItem]
+    total: int
+
+
 class HealthResponse(BaseModel):
     """Resposta do health check com status detalhado."""
     status: str
@@ -95,26 +150,31 @@ tech_sheet_service: Optional[TechSheetService] = None
 storage_service: Optional[StorageService] = None
 
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     """
-    Inicializa os serviços no startup com abordagem FAIL FAST.
+    Gerencia o ciclo de vida da aplicação usando lifespan context manager.
+    
+    Substitui @app.on_event("startup") e @app.on_event("shutdown") depreciados.
+    Esta é a abordagem recomendada pelo FastAPI para gerenciar lifecycle.
     
     Comportamento:
     - Se GEMINI_API_KEY não estiver configurada: FALHA CRÍTICA
     - Se BackgroundRemoverService falhar: FALHA CRÍTICA
     - Se ClassifierService falhar: FALHA CRÍTICA
     
-    A API NÃO inicia em estado inconsistente. Isso garante que problemas
-    de configuração sejam detectados imediatamente no deploy.
+    A API NÃO inicia em estado inconsistente.
     """
     global classifier_service, background_service, tech_sheet_service, storage_service
     
-    print("[STARTUP] Iniciando Frida Orchestrator v0.5.0...")
+    # =========================================================================
+    # STARTUP
+    # =========================================================================
+    print(f"[STARTUP] Iniciando Frida Orchestrator v{APP_VERSION}...")
     
-    # ==========================================================================
+    # -------------------------------------------------------------------------
     # 1. Validação de Configurações OBRIGATÓRIAS (Fail Fast)
-    # ==========================================================================
+    # -------------------------------------------------------------------------
     
     if not settings.GEMINI_API_KEY:
         error_msg = (
@@ -129,9 +189,9 @@ async def startup_event():
     
     print("[STARTUP] ✓ GEMINI_API_KEY configurada")
     
-    # ==========================================================================
+    # -------------------------------------------------------------------------
     # 2. Inicialização de Serviços CRÍTICOS (Fail Fast)
-    # ==========================================================================
+    # -------------------------------------------------------------------------
     
     # 2.1 BackgroundRemoverService (obrigatório para /process)
     try:
@@ -160,9 +220,9 @@ async def startup_event():
         print(error_msg)
         raise StartupError(error_msg) from e
     
-    # ==========================================================================
+    # -------------------------------------------------------------------------
     # 3. Validações Opcionais (Avisos, não bloqueantes)
-    # ==========================================================================
+    # -------------------------------------------------------------------------
     
     if not settings.SUPABASE_URL or not settings.SUPABASE_KEY:
         print("[STARTUP] ⚠ Supabase não configurado (storage e auditoria desabilitados)")
@@ -188,6 +248,43 @@ async def startup_event():
         print("[STARTUP] ⚠ Authentication DISABLED (development mode)")
     
     print("[STARTUP] ======================================")
+    
+    # -------------------------------------------------------------------------
+    # 4. Iniciar Job Worker Daemon (PRD-04)
+    # -------------------------------------------------------------------------
+    if settings.SUPABASE_URL and settings.SUPABASE_KEY:
+        try:
+            job_daemon.start()
+            print("[STARTUP] ✓ JobWorkerDaemon iniciado (processamento async)")
+        except Exception as e:
+            print(f"[STARTUP] ⚠ JobWorkerDaemon não iniciado (opcional): {e}")
+    else:
+        print("[STARTUP] ⚠ JobWorkerDaemon não iniciado (Supabase não configurado)")
+    
+    print("[STARTUP] ======================================")
+    
+    # =========================================================================
+    # YIELD - Aplicação rodando
+    # =========================================================================
+    yield
+    
+    # =========================================================================
+    # SHUTDOWN
+    # =========================================================================
+    print("[SHUTDOWN] Encerrando serviços...")
+    
+    # Parar Job Worker Daemon
+    try:
+        job_daemon.stop()
+        print("[SHUTDOWN] ✓ JobWorkerDaemon parado")
+    except Exception as e:
+        print(f"[SHUTDOWN] ⚠ Erro ao parar JobWorkerDaemon: {e}")
+    
+    print("[SHUTDOWN] ✓ Encerramento completo")
+
+
+# Atribuir lifespan ao app (definido após a função para evitar forward reference)
+app.router.lifespan_context = lifespan
 
 
 # =============================================================================
@@ -462,6 +559,307 @@ def processar_produto(
             status_code=500,
             detail=f"Erro ao processar imagem: {str(e)}"
         )
+
+
+# =============================================================================
+# Async Processing Endpoint (PRD-04)
+# =============================================================================
+
+@app.post("/process-async", response_model=ProcessAsyncResponse)
+def processar_produto_async(
+    file: UploadFile = File(..., description="Imagem do produto para processar"),
+    user: AuthUser = Depends(get_current_user)
+):
+    """
+    Endpoint de processamento ASSÍNCRONO de produtos.
+    
+    Retorna imediatamente (< 2s) após:
+    1. Validar o arquivo
+    2. Classificar com Gemini
+    3. Criar produto no banco
+    4. Upload da imagem original para bucket 'raw'
+    5. Criar job na fila de processamento
+    
+    O processamento pesado (segmentação, composição, validação) é feito
+    por um worker em background. Use GET /jobs/{job_id} para acompanhar.
+    
+    Requer autenticação JWT (se AUTH_ENABLED=true).
+    """
+    user_id = user.user_id
+    
+    # ============================================================
+    # ETAPA 1: Validação do arquivo (3 camadas)
+    # ============================================================
+    if not file.content_type or not validate_image_file(file.content_type):
+        raise HTTPException(
+            status_code=400,
+            detail="Arquivo inválido. Envie uma imagem (JPEG, PNG, WebP ou GIF)."
+        )
+    
+    try:
+        content = file.file.read()
+        
+        # Validação profunda: magic numbers + Pillow integrity
+        is_valid, validation_msg = validate_image_deep(content, file.content_type)
+        if not is_valid:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Imagem inválida: {validation_msg}"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Erro ao ler arquivo: {str(e)}")
+    
+    # ============================================================
+    # ETAPA 2: Classificação com Gemini (rápido ~1s)
+    # ============================================================
+    if not classifier_service:
+        raise HTTPException(
+            status_code=503,
+            detail="Serviço de classificação não disponível. Configure GEMINI_API_KEY."
+        )
+    
+    try:
+        print(f"[ASYNC] Classificando imagem para user {user_id}: {file.filename}")
+        classificacao = classifier_service.classificar(content, file.content_type)
+        print(f"[ASYNC] Classificação: {classificacao['item']} ({classificacao['confianca']:.0%})")
+        
+        # Verificar produto válido
+        if classificacao.get("item") == "desconhecido":
+            raise HTTPException(
+                status_code=400,
+                detail="Imagem não reconhecida como produto válido (bolsa, lancheira ou garrafa)"
+            )
+        
+        # Verificar confiança mínima
+        if classificacao.get("confianca", 0) < 0.5:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Confiança muito baixa: {classificacao.get('confianca', 0):.0%}"
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro na classificação: {str(e)}")
+    
+    # ============================================================
+    # ETAPA 3: Criar produto no banco
+    # ============================================================
+    product_name = f"{classificacao['item'].capitalize()} - {file.filename or 'Upload'}"
+    
+    try:
+        product = create_product(
+            name=product_name,
+            category=classificacao["item"],
+            classification=classificacao,
+            user_id=user_id
+        )
+        db_product_id = product["id"]
+        print(f"[ASYNC] ✓ Produto criado: {db_product_id}")
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Falha ao criar produto: {str(e)}"
+        )
+    
+    # ============================================================
+    # ETAPA 4: Upload imagem original para 'raw'
+    # ============================================================
+    try:
+        original_filename = file.filename or "original"
+        extension = original_filename.split(".")[-1] if "." in original_filename else "jpg"
+        storage_path = f"{user_id}/{db_product_id}/original.{extension}"
+        
+        # Upload para Supabase Storage
+        client = get_supabase_client()
+        
+        upload_response = client.storage.from_("raw").upload(
+            path=storage_path,
+            file=content,
+            file_options={"content-type": file.content_type or "image/jpeg"}
+        )
+        
+        # Obter URL pública
+        original_url = client.storage.from_("raw").get_public_url(storage_path)
+        
+        print(f"[ASYNC] ✓ Original uploaded: {storage_path}")
+        
+    except Exception as e:
+        print(f"[ASYNC] ✗ Erro no upload: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Falha no upload da imagem: {str(e)}"
+        )
+    
+    # ============================================================
+    # ETAPA 5: Registrar imagem original no banco
+    # ============================================================
+    try:
+        original_image = create_image(
+            product_id=db_product_id,
+            type="original",
+            bucket="raw",
+            path=storage_path,
+            user_id=user_id
+        )
+        original_image_id = original_image["id"]
+        print(f"[ASYNC] ✓ Imagem registrada: {original_image_id}")
+    except Exception as e:
+        print(f"[ASYNC] ⚠ Erro ao registrar imagem: {str(e)}")
+        original_image_id = None
+    
+    # ============================================================
+    # ETAPA 6: Criar job na fila
+    # ============================================================
+    input_data = {
+        "original_path": storage_path,
+        "original_url": original_url,
+        "original_image_id": original_image_id,
+        "classification": classificacao,
+        "filename": file.filename
+    }
+    
+    job_id = create_job(
+        product_id=db_product_id,
+        user_id=user_id,
+        input_data=input_data
+    )
+    
+    if not job_id:
+        raise HTTPException(
+            status_code=500,
+            detail="Falha ao criar job de processamento"
+        )
+    
+    print(f"[ASYNC] ✓ Job criado: {job_id}")
+    print(f"[ASYNC] ✓ Processamento enfileirado para user {user_id}")
+    
+    # ============================================================
+    # RESPOSTA IMEDIATA
+    # ============================================================
+    return ProcessAsyncResponse(
+        status="processing",
+        job_id=job_id,
+        product_id=db_product_id,
+        classification={
+            "item": classificacao["item"],
+            "estilo": classificacao["estilo"],
+            "confianca": classificacao["confianca"]
+        },
+        message="Processamento iniciado. Use GET /jobs/{job_id} para acompanhar o progresso."
+    )
+
+
+# =============================================================================
+# Jobs Status Endpoints (PRD-04)
+# =============================================================================
+
+@app.get("/jobs/{job_id}", response_model=JobStatusResponse)
+def get_job_status(
+    job_id: str,
+    user: AuthUser = Depends(get_current_user)
+):
+    """
+    Retorna status atual de um job de processamento.
+    
+    Use para polling após POST /process-async.
+    Recomendado: poll a cada 2 segundos.
+    
+    Status possíveis:
+    - queued: Aguardando na fila
+    - processing: Em processamento (ver current_step e progress)
+    - completed: Concluído com sucesso (ver images e quality_score)
+    - failed: Falhou (ver last_error e can_retry)
+    
+    Requer autenticação JWT (se AUTH_ENABLED=true).
+    """
+    # Buscar job no banco
+    job = get_job(job_id)
+    
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Job não encontrado: {job_id}"
+        )
+    
+    # Verificar permissão (user só vê próprios jobs, admin vê todos)
+    if user.role != "admin" and job["created_by"] != user.user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Acesso negado a este job"
+        )
+    
+    # Montar response base
+    response_data = {
+        "job_id": job["id"],
+        "product_id": job["product_id"],
+        "status": job["status"],
+        "current_step": job.get("current_step"),
+        "progress": job.get("progress", 0),
+        "attempts": job.get("attempts", 0),
+        "max_attempts": job.get("max_attempts", 3),
+        "started_at": job.get("started_at"),
+        "completed_at": job.get("completed_at"),
+        "created_at": job.get("created_at"),
+        "can_retry": False
+    }
+    
+    # Adicionar campos específicos por status
+    if job["status"] == "completed":
+        output_data = job.get("output_data", {})
+        response_data["images"] = output_data.get("images")
+        response_data["quality_score"] = output_data.get("quality_score")
+        response_data["quality_passed"] = output_data.get("quality_passed")
+    
+    elif job["status"] == "failed":
+        response_data["last_error"] = job.get("last_error")
+        # Pode retry se attempts < max_attempts
+        response_data["can_retry"] = job.get("attempts", 0) < job.get("max_attempts", 3)
+    
+    return JobStatusResponse(**response_data)
+
+
+@app.get("/jobs", response_model=JobListResponse)
+def list_user_jobs_endpoint(
+    user: AuthUser = Depends(get_current_user),
+    limit: int = 20
+):
+    """
+    Lista jobs do usuário autenticado (mais recentes primeiro).
+    
+    Args:
+        limit: Máximo de jobs (default 20, max 100)
+    
+    Returns:
+        Lista de jobs ordenada por created_at DESC
+    
+    Requer autenticação JWT (se AUTH_ENABLED=true).
+    """
+    # Validar limit
+    limit = min(max(1, limit), 100)
+    
+    # Buscar jobs
+    jobs = get_user_jobs(user.user_id, limit=limit)
+    
+    # Mapear para response
+    job_items = [
+        JobListItem(
+            job_id=job["id"],
+            product_id=job["product_id"],
+            status=job["status"],
+            progress=job.get("progress", 0),
+            current_step=job.get("current_step"),
+            created_at=job.get("created_at", "")
+        )
+        for job in jobs
+    ]
+    
+    return JobListResponse(
+        jobs=job_items,
+        total=len(job_items)
+    )
 
 
 @app.post("/classify")

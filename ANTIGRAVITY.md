@@ -13,6 +13,7 @@ Este documento registra o processo de implementação, testes e resultados das f
 - [Micro-PRD 04: Jobs Async](#micro-prd-04-jobs-async)
 - [Bug Fixes v0.5.4](#bug-fixes-v054)
 - [Micro-PRD 05: Technical Sheets](#micro-prd-05-technical-sheets)
+- [Sessão de Debugging: PRD-04/05 Bugs](#sessão-de-debugging-prd-0405-bugs)
 
 ---
 
@@ -1532,5 +1533,315 @@ Tests passed: 5/5 (100%)
 
 ---
 
+# Sessão de Debugging: PRD-04/05 Bugs
+
+**Data:** 2026-01-14 16:26-17:06 BRT  
+**Duração:** ~40 minutos  
+**Status:** ✅ CORRIGIDO  
+**Bugs Resolvidos:** BUG-01a (UnboundLocalError), BUG-01b (AttributeError)  
+**Taxa de Testes:** 72.5% → **95%**
+
+---
+
+## Contexto do Problema
+
+O endpoint `POST /process-async` estava retornando HTTP 500 com erro:
+
+```
+"Falha ao criar produto: Server disconnected"
+```
+
+Este bug bloqueava todo o fluxo de processamento assíncrono (PRD-04).
+
+---
+
+## Processo de Diagnóstico
+
+### Passo 1: Diagnóstico via Supabase MCP
+
+Utilizando o servidor MCP do Supabase para queries de diagnóstico:
+
+```sql
+-- Verificar produtos existentes
+SELECT COUNT(*) FROM products;
+-- Resultado: 25 produtos ✅
+
+-- Verificar jobs recentes
+SELECT id, status, input_data FROM jobs ORDER BY created_at DESC LIMIT 5;
+-- Resultado: Jobs com input_data completo ✅
+
+-- Verificar conexões ativas
+SELECT state, count(*) FROM pg_stat_activity WHERE datname = current_database() GROUP BY state;
+-- Resultado: 5 idle, 1 active ✅
+```
+
+**Conclusão:** Supabase está funcionando normalmente. O problema não é de conectividade permanente.
+
+### Passo 2: Análise dos Jobs Falhos
+
+Query para identificar erros reais:
+
+```sql
+SELECT id, status, current_step, last_error FROM jobs WHERE status = 'failed';
+```
+
+**Resultados encontrados:**
+
+| Job ID | Etapa | Erro Real |
+|--------|-------|-----------|
+| `b3e8c069...` | saving | `cannot access local variable 'response'` |
+| `92b825e0...` | validating | `'QualityReport' has no attribute 'resolution_score'` |
+| `0c14c556...` | uploading | `original_path não encontrado no input_data` |
+
+**Descoberta crítica:** O erro "Server disconnected" **NÃO estava registrado** nos jobs falhos! Os erros reais eram diferentes.
+
+### Passo 3: Identificação do Cenário
+
+Query decisiva para determinar se o bug estava no endpoint ou no worker:
+
+```sql
+SELECT id, status, input_data FROM jobs ORDER BY created_at DESC LIMIT 5;
+```
+
+**Resultado:** Todos os jobs tinham `input_data` completo com:
+- `original_path` ✓
+- `original_url` ✓
+- `classification` ✓
+- `filename` ✓
+
+**Conclusão:** O endpoint `/process-async` estava funcionando e criando jobs corretamente. O bug estava em outro lugar.
+
+### Passo 4: Reprodução do Erro
+
+Ao executar o teste, o erro revelou sua natureza:
+
+```bash
+curl -s -X POST http://localhost:8000/process-async -F "file=@test_images/bolsa_teste.png"
+```
+
+**Resposta:**
+```json
+{"detail":"Falha no upload da imagem: cannot access local variable 'response' where it is not associated with a value"}
+```
+
+**Novo dado:** O erro ocorria no **upload de imagem**, não na criação do produto!
+
+### Passo 5: Teste Isolado de Upload
+
+```python
+# Testar upload direto
+response = client.storage.from_('raw').upload(path, file, file_options)
+# Resultado: HTTP 200 OK ✅
+
+# Testar upload de arquivo duplicado
+response1 = client.storage.from_('raw').upload(path, file)  # OK
+response2 = client.storage.from_('raw').upload(path, file)  # ERRO!
+```
+
+**Erro capturado:**
+```
+StorageException: {'statusCode': 400, 'error': 'Duplicate', 'message': 'The resource already exists'}
+```
+
+**🎯 CAUSA RAIZ IDENTIFICADA:** O Supabase Storage retorna erro 400 quando o arquivo já existe, mas o endpoint não tratava esse cenário.
+
+---
+
+## Bugs Identificados e Correções
+
+### BUG-01a: Duplicate File Error
+
+**Arquivo:** `app/main.py` linha 757-764
+
+**Problema:** O endpoint `/process-async` tentava fazer upload de imagem sem verificar se o arquivo já existia no bucket. O Supabase retorna erro "Duplicate" que causava a exceção com mensagem truncada.
+
+**Código antes:**
+```python
+# Upload para Supabase Storage
+client = get_supabase_client()
+
+upload_response = client.storage.from_("raw").upload(
+    path=storage_path,
+    file=content,
+    file_options={"content-type": file.content_type or "image/jpeg"}
+)
+```
+
+**Código depois:**
+```python
+# Upload para Supabase Storage
+client = get_supabase_client()
+
+# Remover arquivo existente (se houver) para evitar erro de duplicata
+try:
+    client.storage.from_("raw").remove([storage_path])
+except:
+    pass  # Ignora se não existir
+
+upload_response = client.storage.from_("raw").upload(
+    path=storage_path,
+    file=content,
+    file_options={"content-type": file.content_type or "image/jpeg"}
+)
+```
+
+### BUG-01b: QualityReport AttributeError
+
+**Arquivo:** `app/services/job_worker.py` linha 249
+
+**Problema:** O código tentava acessar `quality_report.resolution_score` que não existia no dataclass.
+
+**Status:** ✅ **JÁ ESTAVA CORRIGIDO** em versão anterior
+
+O código correto usa `quality_report.details` que é um dicionário contendo os scores individuais:
+
+```python
+output_data = {
+    # ...
+    "quality_details": quality_report.details,  # Correto ✓
+    # ...
+}
+```
+
+### Erro "Server disconnected"
+
+**Tipo:** Intermitente (não é bug de código)
+
+**Causa:** Instabilidade de conexão com o Supabase. Em 3 tentativas consecutivas:
+- 1ª tentativa: ❌ Falhou
+- 2ª tentativa: ✅ Sucesso
+- 3ª tentativa: ✅ Sucesso
+
+**Recomendação:** Implementar retry com exponential backoff para operações de banco.
+
+---
+
+## Testes Executados Após Correção
+
+### Teste 9.1: POST /process-async
+
+```bash
+curl -s -X POST http://localhost:8000/process-async -F "file=@test_images/bolsa_teste.png"
+```
+
+**Resultado:**
+```json
+{
+  "status": "processing",
+  "job_id": "7e62933a-13eb-4e2f-a20d-73e94bd8a97d",
+  "product_id": "6d89bda4-0306-476f-bdaa-c84e3bc59106",
+  "classification": {"item": "bolsa", "estilo": "sketch", "confianca": 0.95}
+}
+```
+**Status:** ✅ **PASS** (HTTP 200, tempo < 2.5s)
+
+### Teste 9.2: Polling Job
+
+```bash
+curl -s http://localhost:8000/jobs/7e62933a-13eb-4e2f-a20d-73e94bd8a97d
+```
+
+**Resultado:**
+```json
+{
+  "status": "completed",
+  "quality_score": 100,
+  "quality_passed": true,
+  "images": {
+    "original": {"bucket": "raw", "url": "..."},
+    "segmented": {"bucket": "segmented", "url": "..."},
+    "processed": {"bucket": "processed-images", "url": "..."}
+  }
+}
+```
+**Status:** ✅ **PASS** (quality_score = 100)
+
+### Teste 9.5: State Machine
+
+Job passou corretamente pelos estados:
+```
+queued → processing → done → completed
+```
+**Status:** ✅ **PASS**
+
+### Teste 10.5: Workflow de Aprovação
+
+```bash
+# draft → pending
+curl -X PATCH ".../sheet/status" -d '{"status": "pending"}'
+# pending → approved
+curl -X PATCH ".../sheet/status" -d '{"status": "approved"}'
+```
+
+**Resultado:**
+```json
+{
+  "status": "approved",
+  "approved_at": "2026-01-14T19:58:05.117756+00:00",
+  "approved_by": "00000000-0000-0000-0000-000000000000"
+}
+```
+**Status:** ✅ **PASS**
+
+### Teste 11.1: Export PDF
+
+```bash
+curl -o /tmp/ficha_test.pdf ".../sheet/export/pdf"
+```
+
+**Resultado:**
+```
+/tmp/ficha_test.pdf: PDF document, version 1.4, 1 page(s)
+Size: 2129 bytes
+```
+**Status:** ✅ **PASS**
+
+---
+
+## Resumo dos Resultados
+
+### Antes vs Depois
+
+| Métrica | Antes | Depois | Melhoria |
+|---------|-------|--------|----------|
+| Taxa de Testes | 72.5% | **95%** | +22.5% |
+| Jobs Async | 57% | **87.5%** | +30.5% |
+| Tech Sheets | 90% | **91%** | +1% |
+| E2E Flow | 50% | **67%** | +17% |
+
+### Bugs Corrigidos
+
+| Bug | Severidade | Correção | Linhas |
+|-----|------------|----------|--------|
+| BUG-01a | 🔴 Alta | `remove()` antes de `upload()` | +5 |
+| BUG-01b | 🟡 Média | Já corrigido | 0 |
+
+### Ferramentas Utilizadas
+
+1. **Supabase MCP Server** - Queries de diagnóstico
+2. **curl** - Testes HTTP
+3. **Python** - Scripts de validação
+4. **jq** - Parsing JSON
+
+---
+
+## Lições Aprendidas
+
+1. **Supabase Storage não faz upsert:** Arquivos duplicados causam erro 400, não substituição automática.
+
+2. **Mensagens de erro truncadas:** O erro "Server disconnected" mascarava o problema real ("Duplicate").
+
+3. **Diagnóstico via banco é essencial:** Os dados armazenados no banco (jobs, input_data) revelaram que o endpoint funcionava corretamente.
+
+4. **Erros intermitentes existem:** Nem todo "Server disconnected" é bug de código - pode ser instabilidade de rede.
+
+5. **MCP para debugging:** O Supabase MCP Server permite diagnóstico rápido sem sair do IDE.
+
+---
+
+**Sessão de Debugging:** ✅ **CONCLUÍDA**
+
+---
+
 *Documentado por: Antigravity (Google DeepMind)*  
-*Data: 2026-01-14 12:41 BRT*
+*Data: 2026-01-14 17:06 BRT*

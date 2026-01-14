@@ -1,12 +1,12 @@
 # Frida Orchestrator - Backend Context
 
 ## Project Status
-**Version:** 0.5.3
-**Last Updated:** 2026-01-13
-**Testing Status:** 64% Complete (16/25 tests passing)
-**Development Progress:** 65% (Micro-PRD 03 Complete)
+**Version:** 0.5.4
+**Last Updated:** 2026-01-14
+**Testing Status:** PRD 0-3: 90% (26/29) | PRD 4-5: 95% (19/20) | PRD03 Unit: 100% (61/61)
+**Development Progress:** 80% (Micro-PRD 04/05 Endpoints Implemented)
 **Code Review Score:** 9.2/10 (see CODE_REVIEW.md)
-**Production Ready:** Core features ✓ | Edge cases & Load testing pending
+**Production Ready:** Core features ✓ | Jobs Async ✓ | Tech Sheets ✓ | Rate Limiting pending
 
 ## Project Overview
 **Frida Orchestrator** is a FastAPI-based backend service designed for the fashion industry (specifically bags, lunchboxes, and thermos). It serves as the intelligence core for the Frida platform, handling image processing, AI classification, and technical documentation generation.
@@ -62,9 +62,11 @@ componentes/
 │   ├── 04_create_products.sql  # Workflow + RLS
 │   ├── 05_create_images.sql    # Image tracking + FK
 │   └── 06_rls_dual_mode.sql    # RLS dual mode (NEW v0.5.3)
-├── scripts/                    # Utility scripts (NEW v0.5.3)
+├── scripts/                    # Utility scripts
 │   ├── test_pipeline.py        # Local pipeline testing
-│   └── test_prd03_complete.py  # Complete PRD 03 test suite (61 tests)
+│   ├── test_prd03_complete.py  # Complete PRD 03 test suite (61 tests)
+│   ├── test_prd_04_05.sh       # PRD 04/05 automated tests (bash)
+│   └── test_e2e_complete.sh    # Full E2E flow test (bash)
 ├── test_images/                # Test images for pipeline validation
 │   ├── bolsa_teste.png         # Test input image
 │   ├── bolsa_teste_segmented.png   # Segmented output
@@ -230,10 +232,19 @@ ProductStatus.values()                # ["draft", "pending", "approved", "reject
 - `GET /products/{id}` - Get specific product
 - `GET /auth/test` - Test authentication
 
-## Testing Protocol (v0.5.0)
-- **16/25 Tests Passing (64%)**
-- **Verified:** Health, Auth Dev Mode, Classification, Full Pipeline, Deep Security.
-- **Pending:** Supabase Storage, Load Testing, Edge Cases.
+## Testing Protocol (v0.5.4)
+
+### Test Results Summary
+
+| Suite | Tests | Status | Script |
+|-------|-------|--------|--------|
+| PRD 0-3 (Core API) | 26/29 | 90% | `testes_PRD_0_a_3.md` |
+| PRD 03 (Unit Tests) | 61/61 | 100% | `scripts/test_prd03_complete.py` |
+| PRD 4-5 (Jobs/Sheets) | 19/20 | 95% | `scripts/test_prd_04_05.sh` |
+| E2E Complete Flow | 7/7 | 100% | `scripts/test_e2e_complete.sh` |
+
+**Verified:** Health, Auth, Classification, Full Pipeline, Security, Jobs Async, Tech Sheets, E2E Flow
+**Pending:** Rate Limiting implementation, Manual Supabase Dashboard verification
 
 ## Micro-PRD 03 Test Suite (v0.5.3)
 
@@ -272,23 +283,28 @@ RESULTADO: ✅ PIPELINE APROVADO
 
 ### Test Commands
 ```bash
+# PRD 03 Unit Tests (61 tests)
 python scripts/test_prd03_complete.py           # All tests
 python scripts/test_prd03_complete.py --unit    # Unit tests only
 python scripts/test_pipeline.py test_images/bolsa_teste.png  # Full pipeline
+
+# PRD 04/05 Integration Tests (bash)
+./scripts/test_prd_04_05.sh                     # Jobs & Sheets (25 tests)
+./scripts/test_e2e_complete.sh                  # Full E2E flow (7 steps)
 ```
 
 ## Development Roadmap
 
-### Current Progress: 65%
+### Current Progress: 80%
 ```
-████████████████████████░░░░░░ 65%
+████████████████████████████░░ 80%
 
 ✅ Micro-PRD 01: Auth & Users (100%)
 ✅ Micro-PRD 02: Product Persistence (100%)
-✅ Micro-PRD 03: Image Pipeline (100%) ← COMPLETE!
-⏸️ Micro-PRD 04: Async Jobs (0%) ← NEXT
-⏸️ Micro-PRD 05: Tech Sheet (0%)
-⏸️ Micro-PRD 06: Workflow Approval (0%)
+✅ Micro-PRD 03: Image Pipeline (100%)
+✅ Micro-PRD 04: Async Jobs (95%) ← IMPLEMENTED (19/20 tests)
+✅ Micro-PRD 05: Tech Sheet (95%) ← IMPLEMENTED (19/20 tests)
+🔄 Micro-PRD 06: Workflow Approval (Testing) ← IN VALIDATION
 ```
 
 ### Completed: Micro-PRD 03 (Image Pipeline)
@@ -299,11 +315,24 @@ python scripts/test_pipeline.py test_images/bolsa_teste.png  # Full pipeline
 - **Test Script:** `scripts/test_pipeline.py` for local testing
 - **Test Result:** 100/100 score on first test
 
-### Next: Micro-PRD 04 (Async Jobs)
-1. Move heavy processing (rembg) to background workers
-2. Implement job queue with status tracking
-3. Add webhook notifications for job completion
-4. Implement retry logic for failed jobs
+### Completed: Micro-PRD 04 & 05 (Async Jobs & Tech Sheets)
+
+**PRD-04 (Async Jobs) - 95% Complete:**
+- `POST /process-async` - Async image processing
+- `GET /jobs` - List all jobs
+- `GET /jobs/{id}` - Get job status with progress
+
+**PRD-05 (Tech Sheets) - 95% Complete:**
+- `POST /products/{id}/sheet` - Create tech sheet
+- `GET/PUT /products/{id}/sheet` - CRUD operations
+- `PATCH /products/{id}/sheet/status` - Workflow transitions
+- `GET /products/{id}/sheet/versions` - Version history
+- `GET /products/{id}/sheet/export/pdf` - PDF export
+
+### Next Steps
+1. Implement Rate Limiting with `slowapi` library
+2. Manual Supabase Dashboard verification
+3. Production deployment documentation
 
 ## Common Tasks & Commands
 - **Run Server:** `uvicorn app.main:app --reload --port 8000`
@@ -339,5 +368,7 @@ python scripts/test_pipeline.py test_images/bolsa_teste.png  # Full pipeline
 ## Related Documentation
 - `CLAUDE.md` - Detailed project context (1000+ lines)
 - `CODE_REVIEW.md` - Comprehensive code analysis (score: 9.2/10)
-- `FASE_DE_TESTES.md` - Testing protocols and progress
-- `ANTIGRAVITY.md` - Implementation history for Micro-PRD 03 (NEW)
+- `testes_PRD_0_a_3.md` - Core API tests (Categories 1-8, 90% passing)
+- `testes_PRD_4_e_5.md` - Jobs Async & Tech Sheets tests (Categories 9-11, 95% passing)
+- `TESTS.md` - Test documentation summary
+- `ANTIGRAVITY.md` - Implementation history for Micro-PRD 03

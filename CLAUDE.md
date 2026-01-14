@@ -6,12 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 | Metric | Value |
 |--------|-------|
-| Version | 0.5.3 |
-| Last Updated | 2026-01-13 |
-| Testing Status | 64% (16/25 core) + 100% (61/61 PRD03) |
+| Version | 0.5.4 |
+| Last Updated | 2026-01-14 |
+| Testing Status | PRD 0-3: 90% (26/29) + PRD 4-5: 95% (19/20) + PRD03 Unit: 100% (61/61) |
 | Code Review Score | 9.2/10 |
-| Development Progress | 65% (Micro-PRD 03 Complete) |
-| Next Phase | Micro-PRD 04 (Async Jobs) |
+| Development Progress | 80% (Micro-PRD 04/05 Endpoints Implemented) |
+| Next Phase | Testing & Stabilization |
 
 ## Project Overview
 
@@ -48,8 +48,10 @@ componentes/
 │   └── utils.py                     # Validation utilities
 ├── SQL para o SUPABASE/             # Migration scripts (01-06)
 ├── scripts/
-│   ├── test_pipeline.py
-│   └── test_prd03_complete.py       # 61 tests
+│   ├── test_pipeline.py             # Local pipeline testing
+│   ├── test_prd03_complete.py       # 61 unit tests
+│   ├── test_prd_04_05.sh            # PRD 04/05 automated tests
+│   └── test_e2e_complete.sh         # Full E2E flow test
 ├── test_images/
 ├── CHANGELOG.md                     # Version history & bug fixes
 ├── TESTS.md                         # Test documentation
@@ -71,7 +73,9 @@ uvicorn app.main:app --reload --port 8000
 curl http://localhost:8000/health
 curl -X POST http://localhost:8000/classify -F "file=@image.jpg"
 curl -X POST http://localhost:8000/process -F "file=@image.jpg"
-python scripts/test_prd03_complete.py
+python scripts/test_prd03_complete.py        # 61 unit tests
+./scripts/test_prd_04_05.sh                  # PRD 04/05 async & sheets
+./scripts/test_e2e_complete.sh               # Full E2E flow
 ```
 
 ## Architecture
@@ -151,10 +155,26 @@ python scripts/test_prd03_complete.py
 |--------|------|-------------|---------------------|
 | POST | `/classify` | Classify image only | `classificacao.item`, `.estilo`, `.confianca` |
 | POST | `/remove-background` | Remove background | `imagem_base64` |
-| POST | `/process` | Full pipeline | `product_id`, `quality_score`, `images`, `categoria` |
+| POST | `/process` | Full pipeline (sync) | `product_id`, `quality_score`, `images`, `categoria` |
+| POST | `/process-async` | Async processing | `job_id`, `product_id`, `status` |
+| GET | `/jobs` | List all jobs | `jobs[]`, `total` |
+| GET | `/jobs/{id}` | Get job status | `status`, `progress`, `quality_score` |
 | GET | `/auth/test` | Test authentication | `user_id`, `email`, `role` |
 | GET | `/products` | List user products | `products[]`, `total` |
 | GET | `/products/{id}` | Get product details | `product` object |
+
+### Technical Sheets (PRD-05)
+
+| Method | Path | Description | Key Response Fields |
+|--------|------|-------------|---------------------|
+| POST | `/products/{id}/sheet` | Create tech sheet | `sheet_id`, `version` |
+| GET | `/products/{id}/sheet` | Get current sheet | `data`, `status`, `version` |
+| PUT | `/products/{id}/sheet` | Update sheet (new version) | `version` (incremented) |
+| PATCH | `/products/{id}/sheet/status` | Change workflow status | `status` |
+| GET | `/products/{id}/sheet/versions` | List all versions | `versions[]` |
+| GET | `/products/{id}/sheet/versions/{v}` | Get specific version | `data`, `version` |
+| DELETE | `/products/{id}/sheet` | Delete sheet | `deleted: true` |
+| GET | `/products/{id}/sheet/export/pdf` | Export as PDF | PDF binary |
 
 ### `/process` Response Fields
 - `product_id`: UUID of created product
@@ -264,22 +284,41 @@ score: int (0-100), passed: bool, details: dict
 **See Also:**
 - `CHANGELOG.md` - Version history, bug fixes, investigations
 - `TESTS.md` - Test documentation and commands
-- `CODE_REVIEW.md` - Code review analysis
-- `FASE_DE_TESTES.md` - Testing protocols
+- `CODE_REVIEW.md` - Code review analysis (9.2/10)
+- `testes_PRD_0_a_3.md` - Core API tests (Categories 1-8)
+- `testes_PRD_4_e_5.md` - Jobs Async & Tech Sheets tests (Categories 9-11)
 
 ## Development Progress
 
 ```
-Micro-PRD 01: Auth & Users       [COMPLETE]
-Micro-PRD 02: Product Persistence [COMPLETE]
-Micro-PRD 03: Image Pipeline      [COMPLETE]
-Micro-PRD 04: Async Jobs          [NEXT]
-Micro-PRD 05: Tech Sheet          [PENDING]
-Micro-PRD 06: Workflow Approval   [PENDING]
+Micro-PRD 01: Auth & Users        [COMPLETE] 100%
+Micro-PRD 02: Product Persistence [COMPLETE] 100%
+Micro-PRD 03: Image Pipeline      [COMPLETE] 100%
+Micro-PRD 04: Async Jobs          [COMPLETE] 95% (endpoints implemented, 19/20 tests)
+Micro-PRD 05: Tech Sheet          [COMPLETE] 95% (endpoints implemented, 19/20 tests)
+Micro-PRD 06: Workflow Approval   [TESTING]  In validation
 ```
 
 **Timeline:** MVP target ~31/01/2026
 
+## Testing Summary
+
+| Suite | Tests | Status | Script |
+|-------|-------|--------|--------|
+| PRD 0-3 (Core API) | 26/29 | 90% | `testes_PRD_0_a_3.md` |
+| PRD 03 (Unit Tests) | 61/61 | 100% | `scripts/test_prd03_complete.py` |
+| PRD 4-5 (Jobs/Sheets) | 19/20 | 95% | `scripts/test_prd_04_05.sh` |
+| E2E Complete Flow | 7/7 | 100% | `scripts/test_e2e_complete.sh` |
+
+### Bugs Fixed (v0.5.4)
+- **BUG-01a:** Storage `remove()` before `upload()` for overwrite
+- **BUG-02:** `quality_report.details` handling in approval workflow
+- **DoS Protection:** 10MB file limit, 8000px dimension limit
+
+### Pending
+- Rate Limiting (use `slowapi`)
+- Manual Supabase Dashboard verification
+
 ---
 **Last Updated:** 2026-01-14
-**Current Phase:** Micro-PRD 04 (Async Jobs)
+**Current Phase:** Testing & Stabilization

@@ -757,6 +757,12 @@ def processar_produto_async(
         # Upload para Supabase Storage
         client = get_supabase_client()
         
+        # Remover arquivo existente (se houver) para evitar erro de duplicata
+        try:
+            client.storage.from_("raw").remove([storage_path])
+        except:
+            pass  # Ignora se não existir
+        
         upload_response = client.storage.from_("raw").upload(
             path=storage_path,
             file=content,

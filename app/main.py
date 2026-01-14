@@ -431,11 +431,30 @@ def processar_produto(
             status_code=400,
             detail="Arquivo inválido. Envie uma imagem (JPEG, PNG, WebP ou GIF)."
         )
-    
+
+    # ============================================================
+    # DoS Protection - Validar tamanho ANTES de processar
+    # ============================================================
+    try:
+        file.file.seek(0, 2)  # Move para o fim do arquivo
+        file_size = file.file.tell()
+        file.file.seek(0)  # Volta ao início
+
+        if file_size > settings.MAX_FILE_SIZE_BYTES:
+            size_mb = file_size / (1024 * 1024)
+            raise HTTPException(
+                status_code=413,
+                detail=f"Arquivo muito grande: {size_mb:.1f}MB. Limite: {settings.MAX_FILE_SIZE_MB}MB"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Erro ao verificar tamanho do arquivo: {str(e)}")
+
     try:
         # 1. Lê o conteúdo do arquivo (síncrono via SpooledTemporaryFile)
         content = file.file.read()
-        
+
         # 2. Validação PROFUNDA: magic numbers + integridade Pillow
         is_valid, validation_msg = validate_image_deep(content, file.content_type)
         if not is_valid:
@@ -443,6 +462,18 @@ def processar_produto(
                 status_code=400,
                 detail=f"Imagem inválida: {validation_msg}"
             )
+
+        # 3. DoS Protection - Validar dimensões da imagem
+        from PIL import Image
+        with io.BytesIO(content) as img_buffer:
+            with Image.open(img_buffer) as img:
+                width, height = img.size
+                max_dim = max(width, height)
+                if max_dim > settings.MAX_IMAGE_DIMENSION:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Imagem muito grande: {width}x{height}px. Dimensão máxima: {settings.MAX_IMAGE_DIMENSION}px"
+                    )
         
         # 3. Classifica a imagem
         classificacao = {"item": "desconhecido", "estilo": "desconhecido", "confianca": 0.0}
@@ -610,17 +641,34 @@ def processar_produto_async(
     user_id = user.user_id
     
     # ============================================================
-    # ETAPA 1: Validação do arquivo (3 camadas)
+    # ETAPA 1: Validação do arquivo (4 camadas com DoS Protection)
     # ============================================================
     if not file.content_type or not validate_image_file(file.content_type):
         raise HTTPException(
             status_code=400,
             detail="Arquivo inválido. Envie uma imagem (JPEG, PNG, WebP ou GIF)."
         )
-    
+
+    # DoS Protection - Validar tamanho ANTES de processar
+    try:
+        file.file.seek(0, 2)  # Move para o fim do arquivo
+        file_size = file.file.tell()
+        file.file.seek(0)  # Volta ao início
+
+        if file_size > settings.MAX_FILE_SIZE_BYTES:
+            size_mb = file_size / (1024 * 1024)
+            raise HTTPException(
+                status_code=413,
+                detail=f"Arquivo muito grande: {size_mb:.1f}MB. Limite: {settings.MAX_FILE_SIZE_MB}MB"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Erro ao verificar tamanho do arquivo: {str(e)}")
+
     try:
         content = file.file.read()
-        
+
         # Validação profunda: magic numbers + Pillow integrity
         is_valid, validation_msg = validate_image_deep(content, file.content_type)
         if not is_valid:
@@ -628,6 +676,18 @@ def processar_produto_async(
                 status_code=400,
                 detail=f"Imagem inválida: {validation_msg}"
             )
+
+        # DoS Protection - Validar dimensões da imagem
+        from PIL import Image
+        with io.BytesIO(content) as img_buffer:
+            with Image.open(img_buffer) as img:
+                width, height = img.size
+                max_dim = max(width, height)
+                if max_dim > settings.MAX_IMAGE_DIMENSION:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Imagem muito grande: {width}x{height}px. Dimensão máxima: {settings.MAX_IMAGE_DIMENSION}px"
+                    )
     except HTTPException:
         raise
     except Exception as e:

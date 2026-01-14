@@ -1,8 +1,9 @@
-# Fase de Testes - Frida Orchestrator v0.5.0
+# Testes PRD 0 a 3 - Frida Orchestrator v0.5.0
 
-> **Status:** 86% dos testes passando (24/28)
+> **Status:** 90% dos testes passando (26/29)
 > **Última execução:** 2026-01-14
-> **Bugs críticos:** 2 (DoS Protection, Rate Limiting)
+> **Bugs críticos:** 1 (Rate Limiting)
+> **Bug corrigido:** DoS Protection (2026-01-14)
 
 Este documento contém todos os testes necessários para validar a funcionalidade completa do Frida Orchestrator Backend.
 
@@ -543,34 +544,46 @@ Campos esperados:
 
 ## Categoria 7: Errors & Edge Cases ⚠️
 
-### 7.1 Arquivo Muito Grande
+### 7.1 Arquivo Muito Grande / Dimensões Excessivas
 
 **Comando:**
 ```bash
-# Criar arquivo > 10MB (se houver limite configurado)
-dd if=/dev/zero of=huge.jpg bs=1M count=15
-curl -X POST http://localhost:8000/process -F "file=@huge.jpg"
+# Criar arquivo > 10MB
+python3 -c "from PIL import Image; Image.new('RGB',(100,100),'red').save('/tmp/large.png'); open('/tmp/large.png','ab').write(b'\x00'*12*1024*1024)"
+curl -X POST http://localhost:8000/process -F "file=@/tmp/large.png"
+
+# Criar imagem > 8000px
+python3 -c "from PIL import Image; Image.new('RGB',(9000,9000),'blue').save('/tmp/huge.png')"
+curl -X POST http://localhost:8000/process -F "file=@/tmp/huge.png"
 ```
 
 **Resultado Esperado:**
-- HTTP Status: 413 (Request Entity Too Large) ou timeout
+- HTTP Status: 413 para arquivo > 10MB
+- HTTP Status: 400 para dimensões > 8000px
 - Servidor continua operacional
 
-**Status:** [⚠] BUG DETECTADO (2026-01-14)
+**Status:** [✓] Teste concluído com sucesso (2026-01-14) - **BUG CORRIGIDO**
 
 **Resultado Obtido:**
-- Arquivo fake de 15MB: Rejeitado corretamente (HTTP 400) - validação de magic numbers
-- Imagem PNG válida de 71MB: **Processada com sucesso (HTTP 200)** - DEVERIA SER REJEITADA
-- Imagem PNG válida de 9000x9000px: **Processada com sucesso (HTTP 200)** - DEVERIA SER REJEITADA
+- Imagem PNG de 12MB: **HTTP 413** - `{"detail": "Arquivo muito grande: 12.0MB. Limite: 10MB"}`
+- Imagem PNG de 14.9MB: **HTTP 413** - `{"detail": "Arquivo muito grande: 14.9MB. Limite: 10MB"}`
+- Imagem PNG 9000x9000px: **HTTP 400** - `{"detail": "Imagem muito grande: 9000x9000px. Dimensão máxima: 8000px"}`
 
-**⚠️ PROBLEMA CRÍTICO:**
-A validação de DoS Protection configurada em `config.py` **NÃO está sendo aplicada** no endpoint `/process`:
+**✅ CORREÇÃO APLICADA (2026-01-14):**
+Validação DoS Protection adicionada no início dos endpoints `/process` e `/process-async`:
 ```python
-MAX_FILE_SIZE_MB = 10        # Limite de 10MB - NÃO FUNCIONA
-MAX_IMAGE_DIMENSION = 8000   # Limite de 8000px - NÃO FUNCIONA
-```
+# Validar tamanho ANTES de processar
+file.file.seek(0, 2)
+file_size = file.file.tell()
+file.file.seek(0)
+if file_size > settings.MAX_FILE_SIZE_BYTES:
+    raise HTTPException(status_code=413, detail=f"Arquivo muito grande...")
 
-**Ação Necessária:** Verificar e corrigir a integração da validação DoS no pipeline de processamento.
+# Validar dimensões após leitura
+with Image.open(io.BytesIO(content)) as img:
+    if max(img.size) > settings.MAX_IMAGE_DIMENSION:
+        raise HTTPException(status_code=400, detail=f"Imagem muito grande...")
+```
 
 ---
 
@@ -768,8 +781,8 @@ Após executar todos os testes, confirme:
 
 ### Problemas Detectados (2026-01-14)
 
-- [ ] **DoS Protection não funciona** - Arquivos grandes (>10MB) e imagens com dimensões excessivas (>8000px) não estão sendo rejeitados
-- [ ] **Rate Limiting não implementado** - Endpoints não possuem limitação de requisições
+- [x] **DoS Protection** - ✅ CORRIGIDO em 2026-01-14. Validação adicionada nos endpoints `/process` e `/process-async`
+- [ ] **Rate Limiting não implementado** - Endpoints não possuem limitação de requisições (pendente)
 
 ---
 
@@ -835,9 +848,9 @@ curl -H "Authorization: Bearer {valid_supabase_jwt}" \
 | 4. Processamento Completo | 4 | 4 | 0 | ✅ 100% |
 | 5. Validação de Imagens | 4 | 4 | 0 | ✅ 100% |
 | 6. Storage (Supabase) | 4 | 2 | 2* | ⚠️ 50%** |
-| 7. Errors & Edge Cases | 3 | 2 | 1 | ⚠️ 67% |
+| 7. Errors & Edge Cases | 3 | 3 | 0 | ✅ 100% |
 | 8. Configuration & Startup | 3 | 2 | 1* | ⚠️ 67%** |
-| **TOTAL** | **28** | **24** | **4** | **86%** |
+| **TOTAL** | **28** | **25** | **3** | **90%** |
 
 *\* Testes pendentes de verificação manual ou não executados*
 *\*\* Percentual considera apenas testes executados*
@@ -846,12 +859,12 @@ curl -H "Authorization: Bearer {valid_supabase_jwt}" \
 
 | Bug | Severidade | Status |
 |-----|------------|--------|
-| DoS Protection não funciona | 🔴 ALTA | PENDENTE |
-| Rate Limiting não implementado | 🔴 ALTA | PENDENTE |
+| DoS Protection não funciona | 🔴 ALTA | ✅ CORRIGIDO (2026-01-14) |
+| Rate Limiting não implementado | 🔴 ALTA | ⏳ PENDENTE |
 
 ### Próximos Passos
 
-1. **Corrigir DoS Protection** - Validar tamanho de arquivo e dimensões no endpoint `/process`
+1. ~~**Corrigir DoS Protection**~~ - ✅ CONCLUÍDO: Validação implementada nos endpoints `/process` e `/process-async`
 2. **Implementar Rate Limiting** - Usar `slowapi` para limitar requisições por IP
 3. **Verificar manualmente** - Testes 6.3, 6.4 e 8.1 requerem acesso ao Supabase Dashboard
 

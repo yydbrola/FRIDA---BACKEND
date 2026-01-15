@@ -29,6 +29,7 @@ from app.auth import get_current_user, AuthUser
 from app.database import (
     create_product, get_user_products, create_image, get_supabase_client,
     create_job, get_job, get_user_jobs,
+    build_storage_public_url,  # Adicionado para GET /products/{id}
     # Technical Sheets CRUD (PRD-05)
     create_technical_sheet, get_technical_sheet, get_sheet_by_product,
     update_technical_sheet, update_sheet_status,
@@ -1037,17 +1038,22 @@ def obter_produto(
     user: AuthUser = Depends(get_current_user)
 ):
     """
-    Obtém detalhes de um produto específico.
+    Obtém detalhes de um produto específico com imagens.
     
     Args:
         product_id: UUID do produto
         
     Returns:
-        JSON com status e dados do produto
+        JSON com status e dados do produto incluindo array images
     """
     try:
         client = get_supabase_client()
-        result = client.table('products').select('*').eq('id', product_id).execute()
+        
+        # Buscar produto COM imagens (JOIN)
+        result = client.table('products')\
+            .select('*, images(id, type, storage_bucket, storage_path, quality_score)')\
+            .eq('id', product_id)\
+            .execute()
         
         if not result.data:
             raise HTTPException(
@@ -1063,6 +1069,35 @@ def obter_produto(
                 status_code=403,
                 detail="Acesso negado a este produto"
             )
+        
+        # Processar imagens para incluir URLs públicas
+        images_raw = product.pop('images', []) or []
+        images_with_urls = []
+        thumbnail_url = None
+        
+        for img in images_raw:
+            img_with_url = {
+                "id": img.get("id"),
+                "type": img.get("type"),
+                "storage_bucket": img.get("storage_bucket"),
+                "storage_path": img.get("storage_path"),
+                "quality_score": img.get("quality_score"),
+                "url": build_storage_public_url(
+                    img.get("storage_bucket", ""),
+                    img.get("storage_path", "")
+                )
+            }
+            images_with_urls.append(img_with_url)
+            
+            # Usar processed como thumbnail, fallback para original
+            if img.get("type") == "processed" and not thumbnail_url:
+                thumbnail_url = img_with_url["url"]
+            elif img.get("type") == "original" and not thumbnail_url:
+                thumbnail_url = img_with_url["url"]
+        
+        # Adicionar ao produto
+        product["images"] = images_with_urls
+        product["thumbnail_url"] = thumbnail_url
         
         return {
             "status": "sucesso",

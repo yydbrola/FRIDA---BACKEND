@@ -14,6 +14,7 @@ Este documento registra o processo de implementação, testes e resultados das f
 - [Bug Fixes v0.5.4](#bug-fixes-v054)
 - [Micro-PRD 05: Technical Sheets](#micro-prd-05-technical-sheets)
 - [Sessão de Debugging: PRD-04/05 Bugs](#sessão-de-debugging-prd-0405-bugs)
+- [Bug Fix: GET /products thumbnail_url](#bug-fix-get-products-thumbnail_url)
 
 ---
 
@@ -1845,3 +1846,125 @@ Size: 2129 bytes
 
 *Documentado por: Antigravity (Google DeepMind)*  
 *Data: 2026-01-14 17:06 BRT*
+
+---
+
+# Bug Fix: GET /products thumbnail_url
+
+**Data:** 2026-01-15  
+**Duração:** ~15 minutos  
+**Status:** ✅ COMPLETO
+
+## Contexto
+
+**Bug:** #1 - Imagens não aparecem no grid do frontend  
+**Causa Raiz:** `GET /products` não retornava URLs de imagens  
+**PRD Afetado:** PRD-03 (deveria ter incluído essa atualização)
+
+---
+
+## Problema Identificado
+
+O endpoint `GET /products` retornava apenas campos da tabela `products`:
+- `id`, `name`, `sku`, `category`, `status`, `created_at`, etc.
+
+As URLs de imagem estavam na tabela `images` separada (relacionada via `product_id`), mas **não eram buscadas**.
+
+---
+
+## Solução Implementada
+
+### Opção Escolhida: JOIN no banco (Opção A)
+
+Modificar `get_user_products()` para fazer nested select com a tabela `images`.
+
+### Arquivos Modificados
+
+| Arquivo | Mudança |
+|---------|---------|
+| `app/database.py` | Adicionado `build_storage_public_url()` + JOIN com images |
+
+---
+
+## Código Implementado
+
+### Nova função helper:
+
+```python
+def build_storage_public_url(bucket: str, path: str) -> str:
+    """Constrói URL pública do Supabase Storage."""
+    base_url = settings.SUPABASE_URL.rstrip('/')
+    return f"{base_url}/storage/v1/object/public/{bucket}/{path}"
+```
+
+### Modificação em get_user_products():
+
+```python
+def get_user_products(user_id: str) -> list:
+    # Nested select para incluir imagens
+    result = client.table('products')\
+        .select('*, images(type, storage_bucket, storage_path)')\
+        .eq('created_by', user_id)\
+        .order('created_at', desc=True)\
+        .execute()
+    
+    # Processamento com fallback: processed → original
+    for product in products:
+        images = product.pop('images', []) or []
+        processed_img = next((img for img in images if img['type'] == 'processed'), None)
+        original_img = next((img for img in images if img['type'] == 'original'), None)
+        
+        img = processed_img or original_img
+        product['thumbnail_url'] = build_storage_public_url(...) if img else None
+```
+
+---
+
+## Teste Realizado
+
+```bash
+curl -s http://localhost:8000/products | jq '.products[0]'
+```
+
+**Resultado:**
+```json
+{
+  "id": "92182e49-8cbf-4449-8aca-20fb65708f01",
+  "name": "Bolsa - file(1).jpg",
+  "category": "bolsa",
+  "status": "draft",
+  "thumbnail_url": "https://...supabase.co/storage/v1/object/public/processed-images/.../processed.png"
+}
+```
+
+**Status:** ✅ Campo `thumbnail_url` presente e correto
+
+---
+
+## Configuração Adicional
+
+Executado via Supabase Dashboard para garantir bucket público:
+
+```sql
+UPDATE storage.buckets SET public = true WHERE name = 'processed-images';
+```
+
+---
+
+## Resumo
+
+| Aspecto | Status |
+|---------|--------|
+| Diagnóstico | ✅ Causa raiz identificada |
+| Implementação | ✅ JOIN + helper function |
+| Fallback | ✅ processed → original |
+| Teste | ✅ thumbnail_url retornado |
+| Bucket público | ✅ Configurado |
+
+**Bug Fix:** ✅ **COMPLETO**
+
+---
+
+*Documentado por: Antigravity (Google DeepMind)*  
+*Data: 2026-01-15 10:45 BRT*
+

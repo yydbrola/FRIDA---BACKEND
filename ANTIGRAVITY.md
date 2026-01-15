@@ -1968,3 +1968,128 @@ UPDATE storage.buckets SET public = true WHERE name = 'processed-images';
 *Documentado por: Antigravity (Google DeepMind)*  
 *Data: 2026-01-15 10:45 BRT*
 
+---
+
+# Sessão de Diagnóstico: CORS e Startup
+
+**Data:** 2026-01-15  
+**Duração:** ~30 minutos  
+**Status:** ✅ RESOLVIDO
+
+## Contexto
+
+O frontend Next.js (localhost:3000) reportou erro "falha na requisição CORS" ao chamar endpoints `/products/{id}/sheet`. O usuário solicitou diagnóstico e correção.
+
+---
+
+## Diagnóstico CORS
+
+### Verificação Realizada
+
+Busca no `main.py` por configuração de CORS:
+
+```python
+# Linhas 61-72 em main.py
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",      # Next.js dev
+        "http://127.0.0.1:3000",      # Next.js dev (alt)
+        "https://*.vercel.app",       # Vercel preview/prod
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+**Resultado:** ✅ CORS já estava corretamente configurado
+
+---
+
+## Causa Raiz
+
+O problema **não era CORS**, mas sim que o **backend não estava rodando**.
+
+```bash
+curl http://localhost:8000/health
+# Output: (vazio - servidor offline)
+```
+
+---
+
+## Verificação de Endpoints /sheet
+
+Busca confirmou que todos os endpoints de ficha técnica existem:
+
+| Linha | Método | Endpoint |
+|-------|--------|----------|
+| 1281 | `POST` | `/products/{product_id}/sheet` |
+| 1342 | `GET` | `/products/{product_id}/sheet` |
+| 1367 | `PUT` | `/products/{product_id}/sheet` |
+| 1412 | `PATCH` | `/products/{product_id}/sheet/status` |
+| 1457 | `GET` | `/products/{product_id}/sheet/versions` |
+| 1488 | `GET` | `/products/{product_id}/sheet/versions/{version}` |
+| 1512 | `DELETE` | `/products/{product_id}/sheet` |
+| 1543 | `GET` | `/products/{product_id}/sheet/export/pdf` |
+
+**Status:** ✅ Todos os 8 endpoints implementados
+
+---
+
+## Resolução: Iniciar Servidores
+
+### Backend FastAPI
+
+```bash
+cd ~/Área\ de\ Trabalho/Projeto\ Frida\ -\ main/componentes
+source venv/bin/activate
+uvicorn app.main:app --reload --port 8000
+```
+
+**Output:**
+```
+[STARTUP] ✓ Todos os serviços inicializados com sucesso!
+[STARTUP] ✓ Servidor pronto em http://0.0.0.0:8000
+[STARTUP] ✓ JobWorkerDaemon iniciado (processamento async)
+INFO:     Application startup complete.
+```
+
+### Frontend Next.js
+
+Localização correta identificada: `FrontEnd/` (não `frida-frontend/`)
+
+```bash
+cd ~/Área\ de\ Trabalho/Projeto\ Frida\ -\ main/FrontEnd
+npm run dev -- -p 3000
+```
+
+**Output:**
+```
+▲ Next.js 14.2.35
+- Local: http://localhost:3000
+✓ Ready in 1978ms
+```
+
+---
+
+## Status Final
+
+| Serviço | URL | Status |
+|---------|-----|--------|
+| Backend FastAPI | http://localhost:8000 | ✅ Rodando |
+| Frontend Next.js | http://localhost:3000 | ✅ Rodando |
+
+---
+
+## Lições Aprendidas
+
+1. **Verificar se o servidor está rodando antes de diagnosticar CORS** - Erro de conexão pode parecer erro de CORS
+2. **Nomenclatura de diretórios** - Frontend estava em `FrontEnd/`, não `frida-frontend/`
+3. **Porta ocupada** - Next.js automaticamente tenta porta alternativa (3001) se 3000 estiver em uso
+
+---
+
+*Documentado por: Antigravity (Google DeepMind)*  
+*Data: 2026-01-15 17:15 BRT*
+

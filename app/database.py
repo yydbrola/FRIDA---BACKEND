@@ -153,26 +153,72 @@ def create_product(name: str, category: str, classification: dict, user_id: str)
         raise
 
 
+def build_storage_public_url(bucket: str, path: str) -> str:
+    """
+    Constrói URL pública do Supabase Storage.
+    
+    Args:
+        bucket: Nome do bucket (ex: 'processed-images', 'raw')
+        path: Caminho do arquivo no bucket
+        
+    Returns:
+        URL pública completa
+    """
+    if not settings.SUPABASE_URL or not bucket or not path:
+        return ""
+    
+    # Supabase Storage URL pattern: {url}/storage/v1/object/public/{bucket}/{path}
+    base_url = settings.SUPABASE_URL.rstrip('/')
+    return f"{base_url}/storage/v1/object/public/{bucket}/{path}"
+
+
 def get_user_products(user_id: str) -> list:
     """
-    Lista todos os produtos de um usuário.
+    Lista todos os produtos de um usuário com thumbnail_url.
+    
+    Faz JOIN com tabela images para obter URL da imagem processada.
+    Fallback: usa imagem original se processed não existir.
     
     Args:
         user_id: UUID do usuário
         
     Returns:
-        Lista de produtos (vazia se nenhum encontrado)
+        Lista de produtos com thumbnail_url (vazia se nenhum encontrado)
     """
     client = get_supabase_client()
     
     try:
+        # Buscar produtos com imagens relacionadas via foreign key
+        # Supabase permite nested select: images(type, storage_bucket, storage_path)
         result = client.table('products')\
-            .select('*')\
+            .select('*, images(type, storage_bucket, storage_path)')\
             .eq('created_by', user_id)\
             .order('created_at', desc=True)\
             .execute()
         
-        return result.data if result.data else []
+        products = result.data if result.data else []
+        
+        # Processar cada produto para adicionar thumbnail_url
+        for product in products:
+            thumbnail_url = None
+            images = product.pop('images', []) or []
+            
+            # Prioridade: processed > original
+            processed_img = next((img for img in images if img['type'] == 'processed'), None)
+            original_img = next((img for img in images if img['type'] == 'original'), None)
+            
+            # Usar processed se existir, senão original
+            img = processed_img or original_img
+            
+            if img and img.get('storage_bucket') and img.get('storage_path'):
+                thumbnail_url = build_storage_public_url(
+                    img['storage_bucket'], 
+                    img['storage_path']
+                )
+            
+            product['thumbnail_url'] = thumbnail_url
+        
+        return products
         
     except Exception as e:
         print(f"[DATABASE] ❌ Erro ao listar produtos: {str(e)}")

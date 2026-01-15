@@ -33,7 +33,7 @@ CREATE POLICY users_admin_all ON public.users
       WHERE id = auth.uid() AND role = 'admin'
     )
   );
-
+  
 -- ============================================================
 -- Verificar tabela criada
 -- ============================================================

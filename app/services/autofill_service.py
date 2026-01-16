@@ -137,6 +137,39 @@ class AutofillService:
                 empty.append(path)
         return empty
     
+    def coerce_value_type(self, field: str, value: Any) -> Any:
+        """
+        Converte valor para o tipo correto baseado no campo.
+        Gemini às vezes retorna números como strings.
+        """
+        # Campos que devem ser inteiros
+        int_fields = {
+            "dimensions.width_top_cm", "dimensions.width_bottom_cm",
+            "dimensions.height_cm", "dimensions.depth_cm",
+            "dimensions.strap_drop_cm", "dimensions.strap_length_cm",
+            "additional.weight_grams", "construction.stitch_per_inch",
+            "compartments.external_pockets", "compartments.internal_pockets"
+        }
+        
+        # Campos que podem ser float
+        float_fields = {
+            "dimensions.strap_width_cm"
+        }
+        
+        if field in int_fields:
+            try:
+                return int(float(str(value)))
+            except (ValueError, TypeError):
+                return value
+        
+        if field in float_fields:
+            try:
+                return float(str(value))
+            except (ValueError, TypeError):
+                return value
+        
+        return value
+    
     def validate_suggestion(self, field: str, value: Any) -> bool:
         """Valida se sugestão está dentro dos ranges permitidos."""
         if field not in VALIDATION_RANGES:
@@ -280,14 +313,17 @@ class AutofillService:
             if field not in empty_fields:
                 continue
             
-            # Validar range
-            if not self.validate_suggestion(field, value):
-                print(f"[AutofillService] ⚠ Valor fora do range: {field}={value}")
+            # Converter tipo se necessário (Gemini retorna strings para números)
+            coerced_value = self.coerce_value_type(field, value)
+            
+            # Validar range (agora com valor convertido)
+            if not self.validate_suggestion(field, coerced_value):
+                print(f"[AutofillService] ⚠ Valor fora do range: {field}={coerced_value}")
                 continue
             
             suggestions.append({
                 "field": field,
-                "value": value,
+                "value": coerced_value,  # Usar valor convertido
                 "confidence": 0.8  # Confiança padrão
             })
         

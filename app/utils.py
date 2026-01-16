@@ -288,3 +288,182 @@ def generate_filename(categoria: str, extension: str = "png") -> str:
     unique_id = uuid.uuid4().hex[:8]
     
     return f"{categoria}_{timestamp}_{unique_id}.{extension}"
+
+
+# =============================================================================
+# Sheet Data Utilities (P0 - Schema v2)
+# =============================================================================
+
+def deep_merge(base: dict, updates: dict) -> dict:
+    """
+    Merge profundo de dicionários.
+    
+    Combina recursivamente dicts aninhados, onde valores de 'updates'
+    sobrescrevem valores de 'base' no mesmo caminho.
+    
+    Args:
+        base: Dicionário base (não modificado)
+        updates: Dicionário com atualizações
+        
+    Returns:
+        Novo dicionário mesclado
+        
+    Example:
+        >>> base = {"a": {"b": 1, "c": 2}, "d": 3}
+        >>> updates = {"a": {"b": 10}}
+        >>> deep_merge(base, updates)
+        {"a": {"b": 10, "c": 2}, "d": 3}
+    """
+    if base is None:
+        base = {}
+    if updates is None:
+        return base.copy()
+    
+    result = base.copy()
+    
+    for key, value in updates.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            # Merge recursivo para dicts aninhados
+            result[key] = deep_merge(result[key], value)
+        else:
+            # Sobrescreve valor
+            result[key] = value
+    
+    return result
+
+
+def apply_na_to_empty(data: dict, na_value: str = "N/A") -> dict:
+    """
+    Substitui None e strings vazias por 'N/A' para exibição.
+    
+    Preserva metadados que começam com '_' (ex: _version, _schema).
+    Útil para preparar dados para exibição em PDFs e templates.
+    
+    Args:
+        data: Dicionário a processar
+        na_value: Valor a usar para campos vazios (default: "N/A")
+        
+    Returns:
+        Novo dicionário com valores vazios substituídos
+        
+    Example:
+        >>> apply_na_to_empty({"name": None, "_version": 2})
+        {"name": "N/A", "_version": 2}
+    """
+    if not isinstance(data, dict):
+        return data
+    
+    result = {}
+    
+    for key, value in data.items():
+        # Preserva metadados
+        if key.startswith("_"):
+            result[key] = value
+        elif isinstance(value, dict):
+            result[key] = apply_na_to_empty(value, na_value)
+        elif isinstance(value, list):
+            # Preserva listas como estão
+            result[key] = value
+        elif value is None or value == "":
+            result[key] = na_value
+        else:
+            result[key] = value
+    
+    return result
+
+
+def remove_na_values(data: dict) -> dict:
+    """
+    Remove valores 'N/A' convertendo para None antes de salvar.
+    
+    Operação inversa de apply_na_to_empty().
+    Use antes de salvar no banco para manter dados limpos.
+    
+    Args:
+        data: Dicionário a processar
+        
+    Returns:
+        Novo dicionário com 'N/A' convertido para None
+        
+    Example:
+        >>> remove_na_values({"name": "N/A", "color": "preto"})
+        {"name": None, "color": "preto"}
+    """
+    if not isinstance(data, dict):
+        return data
+    
+    result = {}
+    
+    for key, value in data.items():
+        if isinstance(value, dict):
+            result[key] = remove_na_values(value)
+        elif value == "N/A":
+            result[key] = None
+        else:
+            result[key] = value
+    
+    return result
+
+
+def get_nested_value(data: dict, path: str):
+    """
+    Obtém valor de caminho aninhado usando notação de ponto.
+    
+    Args:
+        data: Dicionário a buscar
+        path: Caminho separado por pontos (ex: 'dimensions.height_cm')
+        
+    Returns:
+        Valor encontrado ou None se caminho não existir
+        
+    Example:
+        >>> get_nested_value({"a": {"b": {"c": 42}}}, "a.b.c")
+        42
+    """
+    if not data or not path:
+        return None
+    
+    keys = path.split(".")
+    current = data
+    
+    for key in keys:
+        if isinstance(current, dict) and key in current:
+            current = current[key]
+        else:
+            return None
+    
+    return current
+
+
+def set_nested_value(data: dict, path: str, value) -> None:
+    """
+    Define valor em caminho aninhado, criando dicts intermediários se necessário.
+    
+    Modifica o dicionário in-place.
+    
+    Args:
+        data: Dicionário a modificar
+        path: Caminho separado por pontos (ex: 'dimensions.height_cm')
+        value: Valor a definir
+        
+    Example:
+        >>> d = {}
+        >>> set_nested_value(d, "a.b.c", 42)
+        >>> d
+        {"a": {"b": {"c": 42}}}
+    """
+    if not path:
+        return
+    
+    keys = path.split(".")
+    current = data
+    
+    # Navega/cria até o penúltimo nível
+    for key in keys[:-1]:
+        if key not in current or not isinstance(current[key], dict):
+            current[key] = {}
+        current = current[key]
+    
+    # Define o valor no último nível
+    current[keys[-1]] = value
+

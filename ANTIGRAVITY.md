@@ -2093,3 +2093,136 @@ npm run dev -- -p 3000
 *Documentado por: Antigravity (Google DeepMind)*  
 *Data: 2026-01-15 17:15 BRT*
 
+---
+
+# P1-Backend: Auto-fill AI Service
+
+**Data:** 2026-01-16  
+**Duração:** ~45 minutos  
+**Status:** ✅ COMPLETO
+
+## Objetivo
+
+Implementar serviço de auto-preenchimento de fichas técnicas usando Gemini Vision:
+- Analisar imagem do produto e sugerir valores para campos vazios
+- Validar sugestões contra ranges definidos
+- Aplicar sugestões selecionadas pelo usuário
+- Rate limiting para proteger contra abuso
+
+---
+
+## Arquivos Criados/Modificados
+
+| Arquivo | Tipo | Descrição |
+|---------|------|-----------|
+| `app/services/autofill_service.py` | NOVO | Serviço Gemini Vision (~310 linhas) |
+| `app/main.py` | MODIFICADO | +2 endpoints, +180 linhas |
+
+---
+
+## Implementação
+
+### AutofillService (`autofill_service.py`)
+
+**Funcionalidades:**
+- Lista de 31 campos do Schema v2
+- Prompt otimizado para extração de dados
+- Validação de ranges numéricos
+- Download assíncrono de imagens
+
+**Métodos:**
+| Método | Descrição |
+|--------|-----------|
+| `get_empty_fields()` | Identifica campos vazios no sheet |
+| `validate_suggestion()` | Valida valor contra VALIDATION_RANGES |
+| `download_image_as_base64()` | Baixa imagem e converte |
+| `analyze_image()` | Análise principal com Gemini |
+
+**Modelo usado:** `gemini-2.0-flash-lite` (configurado em settings)
+
+---
+
+### Endpoints Adicionados
+
+#### POST `/products/{id}/autofill`
+Rate limit: 10/minuto por IP
+
+**Response:**
+```json
+{
+  "suggestions": [
+    {"field": "materials.hardware.type", "value": "Metal", "confidence": 0.8},
+    {"field": "compartments.closure_type", "value": "Zíper", "confidence": 0.8}
+  ],
+  "empty_fields_count": 18,
+  "suggestions_count": 6
+}
+```
+
+#### POST `/products/{id}/apply-suggestions`
+
+**Request:**
+```json
+{
+  "fields": ["materials.hardware.type", "compartments.closure_type"],
+  "suggestions": [...]
+}
+```
+
+**Response:**
+```json
+{
+  "applied": ["materials.hardware.type", "compartments.closure_type"],
+  "applied_count": 2,
+  "sheet": { "version": 4, "data": {...} }
+}
+```
+
+---
+
+## Testes Realizados
+
+### Teste 1: Importação do Serviço
+```bash
+python -c "from app.services.autofill_service import get_autofill_service; print('OK')"
+```
+**Resultado:** ✅ Sucesso
+
+### Teste 2: Endpoint Autofill
+```bash
+curl -X POST http://localhost:8000/products/{id}/autofill
+```
+**Resultado:** ✅ 6 sugestões retornadas
+- `materials.hardware.type`: "Metal"
+- `materials.hardware.finish`: "Prateado"
+- `compartments.closure_type`: "Zíper"
+- `construction.stitch_type`: "Máquina"
+- `compartments.internal_pockets`: "2"
+- `dimensions.width_bottom_cm`: "30"
+
+### Teste 3: Apply Suggestions
+```bash
+curl -X POST http://localhost:8000/products/{id}/apply-suggestions \
+  -d '{"fields": ["materials.hardware.type", "compartments.closure_type"], ...}'
+```
+**Resultado:** ✅ Campos aplicados, version incrementada para 4
+
+---
+
+## Status Final
+
+| Aspecto | Status |
+|---------|--------|
+| Serviço criado | ✅ |
+| Endpoints adicionados | ✅ |
+| Rate limiting | ✅ 10/min |
+| Testes unitários | ✅ |
+| Testes de API | ✅ |
+
+**P1-Backend:** ✅ **COMPLETO**
+
+---
+
+*Documentado por: Antigravity (Google DeepMind)*  
+*Data: 2026-01-16 00:10 BRT*
+

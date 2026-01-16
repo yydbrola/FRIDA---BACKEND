@@ -19,7 +19,8 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from app.config import settings, APP_VERSION
-from app.utils import validate_image_file, validate_image_deep, generate_filename
+from app.utils import validate_image_file, validate_image_deep, generate_filename, deep_merge, remove_na_values
+from app.schemas.sheet_schema import is_v1_schema, migrate_v1_to_v2, validate_ranges
 from app.services.classifier import ClassifierService
 from app.services.background_remover import BackgroundRemoverService
 from app.services.tech_sheet import TechSheetService
@@ -37,6 +38,7 @@ from app.database import (
 )
 from app.services.job_worker import job_daemon
 from app.services.pdf_generator import pdf_generator
+from app.services.autofill_service import get_autofill_service, apply_suggestions_to_sheet
 
 
 # =============================================================================
@@ -1370,18 +1372,50 @@ def update_product_sheet(
     request: SheetUpdateRequest,
     user: AuthUser = Depends(get_current_user)
 ):
-    """Atualiza dados da ficha técnica (incrementa versão automaticamente)."""
+    """
+    Atualiza dados da ficha técnica (incrementa versão automaticamente).
+    
+    Funcionalidades v2:
+    - Aceita dados v1 e v2
+    - Migra automaticamente v1 → v2 na primeira edição
+    - Deep merge preserva campos não enviados
+    - Valida ranges numéricos (retorna 422 se inválido)
+    """
     sheet = get_sheet_by_product(product_id)
     if not sheet:
         raise HTTPException(status_code=404, detail="Ficha técnica não encontrada")
     
-    # Preparar dados para atualização
-    new_data = request.data.dict(exclude_none=True)
+    # Preparar dados de entrada
+    incoming_data = request.data.dict(exclude_none=True) if hasattr(request.data, 'dict') else dict(request.data)
+    current_data = sheet.get("data", {}) or {}
     
-    # Atualizar
+    # Migração automática v1 → v2
+    if is_v1_schema(current_data):
+        current_data = migrate_v1_to_v2(current_data)
+        print(f"[SHEET] Migrated product {product_id} from v1 to v2")
+    
+    # Deep merge para preservar campos não enviados
+    merged_data = deep_merge(current_data, incoming_data)
+    
+    # Garantir metadados v2
+    merged_data["_version"] = sheet.get("version", 1)
+    merged_data["_schema"] = "bag_v2"
+    
+    # Remover valores "N/A" antes de salvar
+    merged_data = remove_na_values(merged_data)
+    
+    # Validar ranges numéricos
+    is_valid, errors = validate_ranges(merged_data)
+    if not is_valid:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "Validation failed", "errors": errors}
+        )
+    
+    # Atualizar no banco
     success = update_technical_sheet(
         sheet["id"],
-        new_data,
+        merged_data,
         user.user_id,
         request.change_summary
     )
@@ -1617,6 +1651,188 @@ def export_sheet_pdf(
             "Content-Disposition": f"attachment; filename={filename}"
         }
     )
+
+
+# =============================================================================
+# AUTOFILL AI ENDPOINTS (P1)
+# =============================================================================
+
+class AutofillResponse(BaseModel):
+    """Response do endpoint de autofill."""
+    suggestions: List[Dict[str, Any]]
+    analyzed_image: str
+    empty_fields_count: int
+    suggestions_count: int
+    error: Optional[str] = None
+    message: Optional[str] = None
+
+
+class ApplySuggestionsRequest(BaseModel):
+    """Request para aplicar sugestões."""
+    fields: List[str]
+    suggestions: List[Dict[str, Any]]
+
+
+@app.post("/products/{product_id}/autofill", response_model=AutofillResponse)
+@limiter.limit("10/minute")
+async def autofill_sheet(
+    product_id: str,
+    request: Request,
+    user: AuthUser = Depends(get_current_user)
+):
+    """
+    Analisa imagem do produto e sugere preenchimento automático.
+    
+    Usa Gemini Vision para analisar a imagem processada do produto
+    e sugerir valores para campos vazios da ficha técnica.
+    
+    Rate limit: 10 requisições por minuto por IP.
+    
+    Returns:
+        - suggestions: Lista de sugestões {field, value, confidence}
+        - empty_fields_count: Quantos campos estavam vazios
+        - suggestions_count: Quantas sugestões foram geradas
+    """
+    try:
+        client = get_supabase_client()
+        
+        # 1. Buscar produto com imagens
+        product_response = client.table("products")\
+            .select("*, images(id, type, storage_bucket, storage_path)")\
+            .eq("id", product_id)\
+            .execute()
+        
+        if not product_response.data:
+            raise HTTPException(status_code=404, detail="Produto não encontrado")
+        
+        product = product_response.data[0]
+        
+        # 2. Verificar ownership
+        if product["created_by"] != user.user_id and user.role != "admin":
+            raise HTTPException(status_code=403, detail="Acesso negado")
+        
+        # 3. Encontrar imagem processada (ou original como fallback)
+        images = product.get("images", []) or []
+        processed_img = next((img for img in images if img["type"] == "processed"), None)
+        original_img = next((img for img in images if img["type"] == "original"), None)
+        
+        target_img = processed_img or original_img
+        if not target_img:
+            raise HTTPException(status_code=400, detail="Produto não possui imagem")
+        
+        # Construir URL pública
+        image_url = build_storage_public_url(
+            target_img["storage_bucket"],
+            target_img["storage_path"]
+        )
+        
+        if not image_url:
+            raise HTTPException(status_code=400, detail="URL da imagem não disponível")
+        
+        # 4. Buscar sheet atual
+        sheet = get_sheet_by_product(product_id)
+        current_data = sheet.get("data", {}) if sheet else {}
+        
+        # 5. Analisar com IA
+        autofill_service = get_autofill_service()
+        result = await autofill_service.analyze_image(image_url, current_data)
+        
+        return AutofillResponse(**result)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[AUTOFILL] ❌ Erro: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erro no autofill: {str(e)}")
+
+
+@app.post("/products/{product_id}/apply-suggestions")
+async def apply_autofill_suggestions(
+    product_id: str,
+    payload: ApplySuggestionsRequest,
+    user: AuthUser = Depends(get_current_user)
+):
+    """
+    Aplica sugestões selecionadas à ficha técnica.
+    
+    O usuário seleciona quais campos aceitar e este endpoint
+    aplica as mudanças à ficha técnica do produto.
+    
+    Body:
+        - fields: Lista de campos a aplicar
+        - suggestions: Lista de sugestões do autofill
+    
+    Returns:
+        - applied: Lista de campos aplicados
+        - sheet: Dados atualizados da ficha
+    """
+    if not payload.fields:
+        raise HTTPException(status_code=400, detail="Nenhum campo selecionado")
+    
+    try:
+        # 1. Verificar ownership do produto
+        client = get_supabase_client()
+        product_response = client.table("products")\
+            .select("id, created_by")\
+            .eq("id", product_id)\
+            .execute()
+        
+        if not product_response.data:
+            raise HTTPException(status_code=404, detail="Produto não encontrado")
+        
+        product = product_response.data[0]
+        if product["created_by"] != user.user_id and user.role != "admin":
+            raise HTTPException(status_code=403, detail="Acesso negado")
+        
+        # 2. Buscar sheet atual
+        sheet = get_sheet_by_product(product_id)
+        if not sheet:
+            # Criar sheet se não existir
+            sheet_id = create_technical_sheet(product_id, user.user_id)
+            sheet = get_technical_sheet(sheet_id)
+        
+        current_data = sheet.get("data", {}) or {}
+        
+        # 3. Aplicar sugestões
+        updated_data = apply_suggestions_to_sheet(
+            current_data, 
+            payload.suggestions, 
+            payload.fields
+        )
+        
+        # 4. Garantir metadados v2
+        updated_data["_schema"] = "bag_v2"
+        updated_data["_version"] = sheet.get("version", 1)
+        
+        # 5. Salvar no banco
+        success = update_technical_sheet(
+            sheet["id"],
+            updated_data,
+            user.user_id,
+            f"Autofill: {len(payload.fields)} campos"
+        )
+        
+        if not success:
+            raise HTTPException(status_code=500, detail="Falha ao salvar alterações")
+        
+        # 6. Retornar sheet atualizado
+        updated_sheet = get_technical_sheet(sheet["id"])
+        
+        return {
+            "applied": payload.fields,
+            "applied_count": len(payload.fields),
+            "sheet": {
+                "id": updated_sheet["id"],
+                "version": updated_sheet["version"],
+                "data": updated_sheet["data"]
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[APPLY-SUGGESTIONS] ❌ Erro: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erro ao aplicar sugestões: {str(e)}")
 
 
 # =============================================================================
